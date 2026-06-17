@@ -1,0 +1,46 @@
+{
+  "name": "pi-web-ui",
+  "version": "0.1.0",
+  "description": "Web-based TUI for the pi coding agent",
+  "license": "MIT",
+  "author": "",
+  
+  "keywords": ["pi", "coding-agent", "web-ui", "tui", "ai", "cli"],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "type": "module",
+  "bin": {
+    "pi-web-ui": "./bin/pi-web-ui.js"
+  },
+  "files": [
+    "dist/",
+    "bin/"
+  ],
+  "scripts": {
+    "dev": "npm run build:web && tsx server/src/index.ts",
+    "clean": "node -e \"const{rmSync}=require('fs');rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && npm run build:web && npm run bundle:server",
+    "build:web": "vite build web --outDir ../dist/web --emptyOutDir",
+    "bundle:server": "node scripts/bundle-server.mjs",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "esbuild": "^0.28.0",
+    "lucide-react": "^0.468.0",
+    "marked": "^18.0.5",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0",
+    "vite": "^7.0.0",
+    "vitest": "^3.0.0"
+  }
+}

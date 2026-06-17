@@ -1,0 +1,14 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "outDir": "../dist/web-ts",
+    "rootDir": "src",
+    "tsBuildInfoFile": "../dist/web.tsbuildinfo",
+    "types": ["vite/client"]
+  },
+  "references": [{ "path": "../shared" }],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite-env.d.ts"]
+}

@@ -1,0 +1,20 @@
+# Source files (not needed at runtime)
+server/
+shared/
+web/
+scripts/
+docs/
+
+# Config
+tsconfig.json
+vitest.config.ts
+vite.config.*
+*.tsbuildinfo
+
+# Dev
+node_modules/
+.git/
+.gitignore
+*.log
+rpc-traffic.jsonl
+record-rpc.js
