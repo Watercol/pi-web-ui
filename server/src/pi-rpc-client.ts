@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import type { ActivityEvent, AgentMessage, ContentBlock, JsonValue, PiRpcCommand, PiRpcEvent, PiRpcResponse, PiState, QueueState, StreamingMessage, ToolExecutionEvent } from "../../shared/src/index.js";
+import type { ActivityEvent, AgentMessage, ContentBlock, JsonValue, PiRpcCommand, PiRpcEvent, PiRpcResponse, PiState, QueueState, SessionStats, StreamingMessage, ToolExecutionEvent } from "../../shared/src/index.js";
 import { buildPiArgs, type ServerConfig } from "./config.js";
 import { JsonlParser } from "./jsonl.js";
 
@@ -81,6 +81,8 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
     this.child.kill();
   }
 
+  private lastStats: SessionStats | undefined;
+
   getState(): PiState {
     return {
       cwd: this.config.cwd,
@@ -95,7 +97,9 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
       messageCount: this.lastStateData.messageCount,
       pendingMessageCount: this.lastStateData.pendingMessageCount,
       processRunning: Boolean(this.child && !this.child.killed),
-      lastError: this.lastError
+      lastError: this.lastError,
+      autoCompactionEnabled: this.lastStateData.autoCompactionEnabled,
+      stats: this.lastStats
     };
   }
 
@@ -107,9 +111,22 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
     const response = await this.request("get_state");
     if (response.success && response.data && typeof response.data === "object") {
       this.lastStateData = response.data as Partial<PiState>;
+      await this.refreshStats().catch(() => undefined);
       this.emitState();
     }
     return this.getState();
+  }
+
+  async getSessionStats(): Promise<SessionStats | undefined> {
+    return this.lastStats;
+  }
+
+  async refreshStats(): Promise<SessionStats | undefined> {
+    const response = await this.request("get_session_stats");
+    if (response.success && response.data) {
+      this.lastStats = response.data as SessionStats;
+    }
+    return this.lastStats;
   }
 
   async refreshMessages(): Promise<AgentMessage[]> {
@@ -206,13 +223,14 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
     } else if (event.type === "agent_end") {
       this.lastStateData = { ...this.lastStateData, isStreaming: false };
       const messages = (event as { messages?: AgentMessage[] }).messages;
+      const willRetry = Boolean(event.willRetry);
       if (Array.isArray(messages)) {
         this.messages = messages;
       } else {
         void this.refreshMessages().catch(() => undefined);
       }
-      this.emitState();
-      this.emit("agentEnd", messages, Boolean(event.willRetry));
+      this.refreshStats().then(() => this.emitState()).catch(() => this.emitState());
+      this.emit("agentEnd", messages, willRetry);
     } else if (event.type === "message_start") {
       const msg = this.normalizeStreamingMessage(event.message);
       if (msg) this.emit("messageStart", msg);

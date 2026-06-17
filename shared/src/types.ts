@@ -35,6 +35,29 @@ export type PiModel = {
   [key: string]: JsonValue | undefined;
 };
 
+export type SessionStats = {
+  sessionFile?: string;
+  sessionId: string;
+  userMessages: number;
+  assistantMessages: number;
+  toolCalls: number;
+  toolResults: number;
+  totalMessages: number;
+  tokens: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+  cost: number;
+  contextUsage?: {
+    tokens: number | null;
+    contextWindow: number;
+    percent: number | null;
+  };
+};
+
 export type PiState = {
   cwd: string;
   piBin: string;
@@ -49,6 +72,8 @@ export type PiState = {
   pendingMessageCount?: number;
   processRunning: boolean;
   lastError?: string;
+  autoCompactionEnabled?: boolean;
+  stats?: SessionStats;
 };
 
 export type AgentMessage = {

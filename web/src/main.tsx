@@ -1,13 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { CircleStop, RefreshCcw, SendHorizontal, Terminal, Wrench, Monitor, FileCode, AlertTriangle, Loader2, ChevronDown, ChevronRight, Info, RotateCcw, Bell } from "lucide-react";
-import type { ActivityEvent, AgentMessage, JsonValue, PiRpcEvent, PiState, ServerEvent, StreamingMessage, ToolExecutionEvent, ContentBlock, QueueState } from "../../shared/src/index.js";
+import type { ActivityEvent, AgentMessage, JsonValue, PiRpcEvent, PiState, ServerEvent, SessionStats, StreamingMessage, ToolExecutionEvent, ContentBlock, QueueState } from "../../shared/src/index.js";
 import { marked } from "marked";
 import "./styles.css";
 
 type TimelineItem =
   | { kind: "message"; message: AgentMessage }
   | { kind: "toolEvent"; event: ToolExecutionEvent }
+  | { kind: "toolGroup"; events: { kind: "toolEvent"; event: ToolExecutionEvent }[] }
   | { kind: "activity"; event: ActivityEvent };
 
 // ============================================================================
@@ -44,6 +45,9 @@ function App() {
   const shouldStickToBottomRef = useRef(true);
   const isStreamingRef = useRef(false);
   const composingRef = useRef(false);
+  const lastStreamUpdateRef = useRef(0);
+
+  const MAX_VISIBLE_MESSAGES = 1000;
 
   // --- streaming state ---
   const [streamingMessage, setStreamingMessage] = useState<StreamingMessage | undefined>();
@@ -54,7 +58,20 @@ function App() {
   const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
 
   const pushActivity = (event: ActivityEvent) => {
-    setActivityEvents((prev) => [...prev, event].slice(-40));
+    setActivityEvents((prev) => {
+      // Replace matching retry start with its end event to keep a single card
+      if (event.type === "auto_retry_end") {
+        const idx = prev.findIndex(
+          (a) => a.type === "auto_retry_start" && a.attempt === event.attempt
+        );
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = event;
+          return updated;
+        }
+      }
+      return [...prev, event].slice(-40);
+    });
   };
 
   // SSE
@@ -105,6 +122,7 @@ function App() {
         case "agent_start":
           isStreamingRef.current = true;
           setStreamingMessage(undefined);
+          setToolEvents([]);
           setIsCompacting(false);
           setCompactionMessage(undefined);
           break;
@@ -127,17 +145,26 @@ function App() {
           setStreamingMessage(event.message);
           break;
         case "message_update":
-          setStreamingMessage(event.message);
-          // Pre-create tool execution entries for any toolCall blocks not yet tracked
-          for (const block of event.message.content) {
-            if (block.type === "toolCall" && block.id) {
-              setToolEvents((prev) => appendToolEvent(prev, {
-                toolCallId: String(block.id),
-                toolName: String(block.name || "unknown"),
-                args: (block.arguments ?? block.input ?? undefined) as JsonValue | undefined,
-                timestamp: Date.now(),
-                status: "pending"
-              }));
+          // Throttle streaming text updates to ~30fps to avoid excessive re-renders.
+          // Tool call blocks are still processed immediately.
+          {
+            const now = Date.now();
+            const needsThrottle = now - lastStreamUpdateRef.current < 32;
+            // Always process tool calls regardless of throttle
+            for (const block of event.message.content) {
+              if (block.type === "toolCall" && block.id) {
+                setToolEvents((prev) => appendToolEvent(prev, {
+                  toolCallId: String(block.id),
+                  toolName: String(block.name || "unknown"),
+                  args: (block.arguments ?? block.input ?? undefined) as JsonValue | undefined,
+                  timestamp: Date.now(),
+                  status: "pending"
+                }));
+              }
+            }
+            if (!needsThrottle) {
+              lastStreamUpdateRef.current = now;
+              setStreamingMessage(event.message);
             }
           }
           break;
@@ -184,9 +211,63 @@ function App() {
   }, [messages, streamingMessage, toolEvents, activityEvents, isCompacting]);
 
   // Merge all event streams into a single chronological timeline
-  const timeline = useMemo((): TimelineItem[] => {
+  // Cap messages to avoid performance degradation on long sessions
+  const timeline = useMemo((): { items: TimelineItem[]; truncated: boolean } => {
+    const totalMessages = messages.length;
+    const visibleMessages = totalMessages > MAX_VISIBLE_MESSAGES
+      ? messages.slice(-MAX_VISIBLE_MESSAGES)
+      : messages;
+
     const items: TimelineItem[] = [];
-    for (const message of messages) {
+    // Build a lookup of tool results from toolResult messages, keyed by toolCallId then toolName
+    const toolResultMap = new Map<string, ContentBlock[]>();
+    const consumedResults = new Set<string>();
+    for (const message of visibleMessages) {
+      if (message.role === "toolResult") {
+        const key = String(message.toolCallId ?? message.toolName ?? "");
+        if (key) toolResultMap.set(key, extractContentBlocks(message));
+      }
+    }
+
+    // Pass 1: non-toolResult messages + synthetic tool events from assistant content
+    for (const message of visibleMessages) {
+      if (message.role === "toolResult") continue; // handled in pass 2
+      items.push({ kind: "message", message });
+      if (message.role === "assistant") {
+        const blocks = extractContentBlocks(message);
+        for (const block of blocks) {
+          if (block.type === "toolCall" && block.id && block.name) {
+            const exists = toolEvents.some((t) => t.toolCallId === String(block.id));
+            if (!exists) {
+              const callId = String(block.id);
+              const callName = String(block.name);
+              const resultContent = toolResultMap.get(callId) ?? toolResultMap.get(callName);
+              if (resultContent && resultContent.length > 0) {
+                consumedResults.add(callId);
+                consumedResults.add(callName);
+              }
+              items.push({
+                kind: "toolEvent",
+                event: {
+                  toolCallId: callId,
+                  toolName: callName,
+                  args: (block.input ?? block.arguments ?? undefined) as JsonValue | undefined,
+                  timestamp: message.timestamp as number | undefined,
+                  status: "complete",
+                  ...(resultContent && resultContent.length > 0 && { result: { content: resultContent } })
+                }
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Pass 2: unconsumed toolResult messages render as standalone ToolResultBubble
+    for (const message of visibleMessages) {
+      if (message.role !== "toolResult") continue;
+      const key = String(message.toolCallId ?? message.toolName ?? "");
+      if (key && consumedResults.has(key)) continue;
       items.push({ kind: "message", message });
     }
     for (const tool of toolEvents) {
@@ -195,11 +276,36 @@ function App() {
     for (const event of activityEvents) {
       items.push({ kind: "activity", event });
     }
-    return items.sort((a, b) => {
+    const sorted = items.sort((a, b) => {
       const ta = timelineTimestamp(a) ?? 0;
       const tb = timelineTimestamp(b) ?? 0;
       return ta - tb;
     });
+    // Collapse consecutive tool events (2+) into a single expandable group
+    const collapsed: TimelineItem[] = [];
+    let toolGroup: { kind: "toolEvent"; event: ToolExecutionEvent }[] = [];
+    for (const item of sorted) {
+      if (item.kind === "toolEvent") {
+        toolGroup.push(item);
+      } else {
+        if (toolGroup.length >= 2) {
+          collapsed.push({ kind: "toolGroup", events: toolGroup });
+        } else if (toolGroup.length === 1) {
+          collapsed.push(toolGroup[0]!);
+        }
+        toolGroup = [];
+        collapsed.push(item);
+      }
+    }
+    if (toolGroup.length >= 2) {
+      collapsed.push({ kind: "toolGroup", events: toolGroup });
+    } else if (toolGroup.length === 1 && toolGroup[0]) {
+      collapsed.push(toolGroup[0]);
+    }
+    return {
+      items: collapsed,
+      truncated: totalMessages > MAX_VISIBLE_MESSAGES
+    };
   }, [messages, toolEvents, activityEvents]);
 
   async function fetchState() {
@@ -282,17 +388,28 @@ function App() {
         </div>
       )}
 
+      {state.stats && <StatsBar stats={state.stats} autoCompactEnabled={state.autoCompactionEnabled} />}
+
       <section ref={listRef} className="message-list" aria-live="polite" onScroll={handleMessageListScroll}>
-        {timeline.length === 0 && !streamingMessage ? (
+        {timeline.items.length === 0 && !streamingMessage ? (
           <div className="empty-state">Start a Pi RPC chat in {state.cwd || "this workspace"}.</div>
         ) : (
           <>
-            {timeline.map((item, i) => {
+            {timeline.truncated && (
+              <div className="truncation-notice">
+                Showing last {MAX_VISIBLE_MESSAGES} of {messages.length} messages.
+                Older messages are hidden for performance.
+              </div>
+            )}
+            {timeline.items.map((item, i) => {
               if (item.kind === "message") {
                 return <MessageBubble key={item.message.id || i} message={item.message} />;
               }
               if (item.kind === "toolEvent") {
                 return <ToolExecutionBubble key={`${item.event.toolCallId}-${i}`} tool={item.event} />;
+              }
+              if (item.kind === "toolGroup") {
+                return <ToolGroupBubble key={`tg-${i}`} events={item.events} />;
               }
               return <ActivityBubble key={item.event.id} event={item.event} />;
             })}
@@ -401,7 +518,7 @@ function UserBubble({ message }: { message: AgentMessage }) {
 // ============================================================================
 function AssistantBubble({ message }: { message: AgentMessage }) {
   const contentBlocks = extractContentBlocks(message);
-  const [showThinking, setShowThinking] = useState(false);
+  const [showThinking, setShowThinking] = useState(true);
 
   const textBlocks = contentBlocks.filter((b) => b.type === "text");
   const thinkingBlocks = contentBlocks.filter((b) => b.type === "thinking");
@@ -449,7 +566,7 @@ function AssistantBubble({ message }: { message: AgentMessage }) {
 // Streaming assistant message
 // ============================================================================
 function StreamingAssistantBubble({ message }: { message: StreamingMessage }) {
-  const [showThinking, setShowThinking] = useState(false);
+  const [showThinking, setShowThinking] = useState(true);
 
   const textBlocks = message.content.filter((b) => b.type === "text");
   const thinkingBlocks = message.content.filter((b) => b.type === "thinking");
@@ -500,6 +617,32 @@ function StreamingAssistantBubble({ message }: { message: StreamingMessage }) {
 // ============================================================================
 // Tool execution bubble
 // ============================================================================
+
+function ToolGroupBubble({ events }: { events: { kind: "toolEvent"; event: ToolExecutionEvent }[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const toolCount = events.length;
+  const names = events.map((e) => e.event.toolName).join(", ");
+  const hasRunning = events.some((e) => e.event.status === "running" || e.event.status === "pending");
+
+  return (
+    <article className={`message tool-group${hasRunning ? " has-running" : ""}`}>
+      <button className="tool-group-toggle" onClick={() => setExpanded(!expanded)}>
+        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        {hasRunning && <Loader2 size={12} className="spinner" />}
+        {toolCount} tools
+        <span className="tool-group-names">{names}</span>
+      </button>
+      {expanded && (
+        <div className="tool-group-items">
+          {events.map((e, i) => (
+            <ToolExecutionBubble key={e.event.toolCallId || i} tool={e.event} />
+          ))}
+        </div>
+      )}
+    </article>
+  );
+}
+
 function ToolExecutionBubble({ tool }: { tool: ToolExecutionEvent }) {
   const ss = tool.status;
   const hasResult = !!(tool.result || tool.partialResult);
@@ -885,6 +1028,7 @@ function summarizeContentBlocks(blocks: ContentBlock[]): string {
 function timelineTimestamp(item: TimelineItem): number | undefined {
   if (item.kind === "message") return item.message.timestamp as number | undefined;
   if (item.kind === "toolEvent") return item.event.timestamp;
+  if (item.kind === "toolGroup") return item.events[0]?.event.timestamp;
   return item.event.timestamp;
 }
 
@@ -920,6 +1064,53 @@ function stripAnsiDisplay(text: string): string {
   return text
     .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
     .replace(/\x1b\]133;[ABC]\x07/g, "");
+}
+
+// ============================================================================
+// Stats bar
+// ============================================================================
+
+function formatTokens(count: number): string {
+  if (count < 1000) return count.toString();
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1000000) return `${Math.round(count / 1000)}k`;
+  if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
+  return `${Math.round(count / 1000000)}M`;
+}
+
+function StatsBar({ stats, autoCompactEnabled }: { stats: SessionStats; autoCompactEnabled?: boolean }) {
+  const parts: string[] = [];
+
+  if (stats.tokens.input > 0) parts.push(`↑${formatTokens(stats.tokens.input)}`);
+  if (stats.tokens.output > 0) parts.push(`↓${formatTokens(stats.tokens.output)}`);
+  if (stats.tokens.cacheRead > 0) parts.push(`R${formatTokens(stats.tokens.cacheRead)}`);
+  if (stats.tokens.cacheWrite > 0) parts.push(`W${formatTokens(stats.tokens.cacheWrite)}`);
+
+  if (stats.tokens.cacheRead > 0 || stats.tokens.cacheWrite > 0) {
+    const totalPrompt = stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite;
+    if (totalPrompt > 0) {
+      parts.push(`CH${((stats.tokens.cacheRead / totalPrompt) * 100).toFixed(1)}%`);
+    }
+  }
+
+  if (stats.cost > 0) parts.push(`$${stats.cost.toFixed(3)}`);
+
+  if (stats.contextUsage) {
+    const cu = stats.contextUsage;
+    const autoIndicator = autoCompactEnabled ? " (auto)" : "";
+    const ctxDisplay = cu.percent !== null
+      ? `${cu.percent.toFixed(1)}%/${formatTokens(cu.contextWindow)}${autoIndicator}`
+      : `?/${formatTokens(cu.contextWindow)}${autoIndicator}`;
+    parts.push(ctxDisplay);
+  }
+
+  if (parts.length === 0) return null;
+
+  return (
+    <div className="stats-bar">
+      <span>{parts.join(" · ")}</span>
+    </div>
+  );
 }
 
 // ============================================================================

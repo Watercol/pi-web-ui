@@ -17,7 +17,7 @@
   },
   "type": "module",
   "bin": {
-    "pi-web-ui": "./bin/pi-web-ui.js"
+    "pi-web-ui": "bin/pi-web-ui.js"
   },
   "files": [
     "dist/",
