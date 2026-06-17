@@ -1,9 +1,19 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { CircleStop, RefreshCcw, SendHorizontal, Terminal, Wrench, Monitor, FileCode, AlertTriangle, Loader2, ChevronDown, ChevronRight, Info, RotateCcw, Bell } from "lucide-react";
 import type { ActivityEvent, AgentMessage, JsonValue, PiRpcEvent, PiState, ServerEvent, SessionStats, StreamingMessage, ToolExecutionEvent, ContentBlock, QueueState } from "../../shared/src/index.js";
 import { marked } from "marked";
 import "./styles.css";
+
+const COMPOSER_MAX_VIEWPORT_RATIO = 0.5;
+
+function resizeComposerTextarea(el: HTMLTextAreaElement) {
+  el.style.height = "auto";
+  const maxHeight = Math.max(46, window.innerHeight * COMPOSER_MAX_VIEWPORT_RATIO);
+  const nextHeight = Math.min(el.scrollHeight, maxHeight);
+  el.style.height = `${nextHeight}px`;
+  el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+}
 
 type TimelineItem =
   | { kind: "message"; message: AgentMessage }
@@ -42,6 +52,7 @@ function App() {
   const [error, setError] = useState<string | undefined>();
   const [connected, setConnected] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const shouldStickToBottomRef = useRef(true);
   const isStreamingRef = useRef(false);
   const composingRef = useRef(false);
@@ -202,6 +213,22 @@ function App() {
       }
     };
     return () => source.close();
+  }, []);
+
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    resizeComposerTextarea(el);
+  }, [draft]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      const el = textareaRef.current;
+      if (el) resizeComposerTextarea(el);
+    };
+
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
   }, []);
 
   // Auto-scroll when messages or streaming content changes
@@ -430,6 +457,7 @@ function App() {
 
       <footer className="composer">
         <textarea
+          ref={textareaRef}
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           onCompositionStart={() => { composingRef.current = true; }}

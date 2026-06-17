@@ -924,8 +924,10 @@ textarea {
 .composer textarea {
   width: 100%;
   min-height: 46px;
-  max-height: 160px;
-  resize: vertical;
+  max-height: 50vh;
+  box-sizing: border-box;
+  resize: none;
+  overflow-y: hidden;
   border: 1px solid var(--border-hover);
   border-radius: 8px;
   padding: 11px 12px;
