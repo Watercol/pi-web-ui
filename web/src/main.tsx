@@ -21,6 +21,13 @@ type TimelineItem =
   | { kind: "toolGroup"; events: { kind: "toolEvent"; event: ToolExecutionEvent }[] }
   | { kind: "activity"; event: ActivityEvent };
 
+type ExtensionStatus = {
+  key: string;
+  text: string;
+  title?: string;
+  timestamp: number;
+};
+
 // ============================================================================
 // State helpers
 // ============================================================================
@@ -51,6 +58,7 @@ function App() {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | undefined>();
   const [connected, setConnected] = useState(false);
+  const [displayStats, setDisplayStats] = useState<SessionStats | undefined>();
   const listRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const shouldStickToBottomRef = useRef(true);
@@ -67,8 +75,38 @@ function App() {
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactionMessage, setCompactionMessage] = useState<string | undefined>();
   const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
+  const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatus[]>([]);
+
+  const updateExtensionStatus = (event: Extract<ActivityEvent, { type: "extension_ui_request" }>) => {
+    const rawText = event.statusText || event.message || event.text || event.title || event.statusKey || "Extension UI update";
+    const text = stripAnsiDisplay(rawText).trim();
+    if (!text) return;
+
+    const key = event.statusKey || event.widgetKey || event.title || event.method;
+    const next: ExtensionStatus = {
+      key,
+      text,
+      title: event.title,
+      timestamp: event.timestamp
+    };
+
+    setExtensionStatuses((prev) => {
+      const idx = prev.findIndex((status) => status.key === key);
+      if (idx >= 0) {
+        const updated = [...prev];
+        updated[idx] = next;
+        return updated;
+      }
+      return [...prev, next].slice(-8);
+    });
+  };
 
   const pushActivity = (event: ActivityEvent) => {
+    if (event.type === "extension_ui_request" && event.method === "setStatus") {
+      updateExtensionStatus(event);
+      return;
+    }
+
     setActivityEvents((prev) => {
       // Replace matching retry start with its end event to keep a single card
       if (event.type === "auto_retry_end") {
@@ -105,6 +143,7 @@ function App() {
         case "state":
           setState(event.state);
           isStreamingRef.current = event.state.isStreaming;
+          setDisplayStats((current) => event.state.isStreaming && current ? current : event.state.stats);
           break;
         case "messages":
           setMessages(mergeMessages([], event.messages));
@@ -339,6 +378,7 @@ function App() {
     const nextState = (await response.json()) as PiState;
     isStreamingRef.current = nextState.isStreaming;
     setState(nextState);
+    setDisplayStats((current) => nextState.isStreaming && current ? current : nextState.stats);
   }
 
   async function fetchMessages() {
@@ -414,7 +454,13 @@ function App() {
         </div>
       )}
 
-      {state.stats && <StatsBar stats={state.stats} autoCompactEnabled={state.autoCompactionEnabled} />}
+      {(displayStats || extensionStatuses.length > 0) && (
+        <StatsBar
+          stats={displayStats}
+          autoCompactEnabled={state.autoCompactionEnabled}
+          extensionStatuses={extensionStatuses}
+        />
+      )}
 
       <section ref={listRef} className="message-list" aria-live="polite" onScroll={handleMessageListScroll}>
         {timeline.items.length === 0 && !streamingMessage ? (
@@ -1197,24 +1243,33 @@ function formatTokens(count: number): string {
   return `${Math.round(count / 1000000)}M`;
 }
 
-function StatsBar({ stats, autoCompactEnabled }: { stats: SessionStats; autoCompactEnabled?: boolean }) {
+function StatsBar({
+  stats,
+  autoCompactEnabled,
+  extensionStatuses
+}: {
+  stats?: SessionStats;
+  autoCompactEnabled?: boolean;
+  extensionStatuses?: ExtensionStatus[];
+}) {
   const parts: string[] = [];
+  const statuses = extensionStatuses ?? [];
 
-  if (stats.tokens.input > 0) parts.push(`↑${formatTokens(stats.tokens.input)}`);
-  if (stats.tokens.output > 0) parts.push(`↓${formatTokens(stats.tokens.output)}`);
-  if (stats.tokens.cacheRead > 0) parts.push(`R${formatTokens(stats.tokens.cacheRead)}`);
-  if (stats.tokens.cacheWrite > 0) parts.push(`W${formatTokens(stats.tokens.cacheWrite)}`);
+  if (stats?.tokens.input && stats.tokens.input > 0) parts.push(`↑${formatTokens(stats.tokens.input)}`);
+  if (stats?.tokens.output && stats.tokens.output > 0) parts.push(`↓${formatTokens(stats.tokens.output)}`);
+  if (stats?.tokens.cacheRead && stats.tokens.cacheRead > 0) parts.push(`R${formatTokens(stats.tokens.cacheRead)}`);
+  if (stats?.tokens.cacheWrite && stats.tokens.cacheWrite > 0) parts.push(`W${formatTokens(stats.tokens.cacheWrite)}`);
 
-  if (stats.tokens.cacheRead > 0 || stats.tokens.cacheWrite > 0) {
+  if ((stats?.tokens.cacheRead && stats.tokens.cacheRead > 0) || (stats?.tokens.cacheWrite && stats.tokens.cacheWrite > 0)) {
     const totalPrompt = stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite;
     if (totalPrompt > 0) {
       parts.push(`CH${((stats.tokens.cacheRead / totalPrompt) * 100).toFixed(1)}%`);
     }
   }
 
-  if (stats.cost > 0) parts.push(`$${stats.cost.toFixed(3)}`);
+  if (stats?.cost && stats.cost > 0) parts.push(`$${stats.cost.toFixed(3)}`);
 
-  if (stats.contextUsage) {
+  if (stats?.contextUsage) {
     const cu = stats.contextUsage;
     const autoIndicator = autoCompactEnabled ? " (auto)" : "";
     const ctxDisplay = cu.percent !== null
@@ -1223,11 +1278,20 @@ function StatsBar({ stats, autoCompactEnabled }: { stats: SessionStats; autoComp
     parts.push(ctxDisplay);
   }
 
-  if (parts.length === 0) return null;
+  if (parts.length === 0 && statuses.length === 0) return null;
 
   return (
     <div className="stats-bar">
-      <span>{parts.join(" · ")}</span>
+      {parts.length > 0 && <span>{parts.join(" · ")}</span>}
+      {statuses.length > 0 && (
+        <div className="extension-status-list" aria-label="Extension status">
+          {statuses.map((status) => (
+            <span className="extension-status" key={status.key} title={status.title || status.key}>
+              {status.text}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

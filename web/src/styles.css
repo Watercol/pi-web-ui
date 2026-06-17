@@ -875,12 +875,36 @@ textarea {
 .stats-bar {
   display: flex;
   align-items: center;
+  gap: 12px;
   padding: 6px 20px;
   background: #f8fafb;
   border-bottom: 1px solid #d8dde3;
   font-size: var(--fs-sm);
   color: #465668;
   font-family: var(--font-mono);
+  min-height: 32px;
+  min-width: 0;
+}
+
+.extension-status-list {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.extension-status {
+  display: inline-flex;
+  align-items: center;
+  max-width: min(360px, 45vw);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-left: 1px solid #ccd5df;
+  padding-left: 10px;
+  color: #2f4154;
 }
 
 .option-list {
