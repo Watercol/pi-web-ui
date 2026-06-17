@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.4 — 2026-06-17
+
+### Added
+- Extension status display in stats bar: extension_ui_request setStatus events
+  rendered inline alongside token stats, deduplicated by key
+
+### Fixed
+- Stats bar no longer flickers during active streaming (displayStats frozen state)
+
 ## 0.1.3 — 2026-06-17
 
 ### Added
