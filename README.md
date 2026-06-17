@@ -14,7 +14,7 @@ A web-based terminal UI for the [pi](https://github.com/earendil-works/pi-coding
 ## Install
 
 ```bash
-npm install -g pi-web-ui
+npm install -g @watercol/pi-web-ui
 ```
 
 ## Usage
