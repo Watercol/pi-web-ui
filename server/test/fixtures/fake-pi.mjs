@@ -29,10 +29,11 @@ function handle(command) {
       command: "get_state",
       success: true,
       data: {
-        model: { id: "fake/model", provider: "fake" },
+        model: { id: "fake/model", provider: "fake", contextWindow: 100000 },
         thinkingLevel: "medium",
         isStreaming: false,
         sessionId: "fake-session",
+        autoCompactionEnabled: true,
         messageCount: 0,
         pendingMessageCount: 0
       }
@@ -67,7 +68,16 @@ function handle(command) {
         content: [
           { type: "text", text: `echo: ${command.message}` },
           { type: "toolCall", id: "call-1", name: "read", arguments: { path: "package.json" } }
-        ]
+        ],
+        usage: {
+          input: 1200,
+          output: 80,
+          cacheRead: 300,
+          cacheWrite: 20,
+          totalTokens: 1600,
+          cost: { total: 0.0123 }
+        },
+        responseId: "fake-response-1"
       }
     });
     send({ type: "turn_end", toolResults: [] });
@@ -75,7 +85,19 @@ function handle(command) {
       type: "agent_end",
       messages: [
         { role: "user", content: command.message },
-        { role: "assistant", content: `echo: ${command.message}` }
+        {
+          role: "assistant",
+          content: `echo: ${command.message}`,
+          usage: {
+            input: 1200,
+            output: 80,
+            cacheRead: 300,
+            cacheWrite: 20,
+            totalTokens: 1600,
+            cost: { total: 0.0123 }
+          },
+          responseId: "fake-response-1"
+        }
       ]
     });
     return;

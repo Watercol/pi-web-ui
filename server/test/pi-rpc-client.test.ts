@@ -55,8 +55,36 @@ describe("PiRpcClient", () => {
     expect(toolArgs).toContainEqual({ path: "package.json" });
     expect(client.getMessages()).toEqual([
       { role: "user", content: "hello" },
-      { role: "assistant", content: "echo: hello" }
+      {
+        role: "assistant",
+        content: "echo: hello",
+        usage: {
+          input: 1200,
+          output: 80,
+          cacheRead: 300,
+          cacheWrite: 20,
+          totalTokens: 1600,
+          cost: { total: 0.0123 }
+        },
+        responseId: "fake-response-1"
+      }
     ]);
+    expect(client.getState().stats).toMatchObject({
+      sessionId: "fake-session",
+      tokens: {
+        input: 1200,
+        output: 80,
+        cacheRead: 300,
+        cacheWrite: 20,
+        total: 1600
+      },
+      cost: 0.0123,
+      contextUsage: {
+        tokens: 1520,
+        contextWindow: 100000,
+        percent: 1.52
+      }
+    });
 
     client.stop();
     await waitFor(() => !client.getState().processRunning);

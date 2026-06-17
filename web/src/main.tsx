@@ -107,7 +107,7 @@ function App() {
           isStreamingRef.current = event.state.isStreaming;
           break;
         case "messages":
-          setMessages(event.messages);
+          setMessages(mergeMessages([], event.messages));
           break;
         case "error":
           setError(event.message);
@@ -183,7 +183,7 @@ function App() {
           // Only persist assistant/system messages; user is added by sendPrompt(),
           // toolResult is shown via ToolExecutionBubble
           if (event.message.role === "assistant" || event.message.role === "compactionSummary" || event.message.role === "branchSummary" || event.message.role === "custom" || event.message.role === "bashExecution") {
-            setMessages((prev) => [...prev, event.message as unknown as AgentMessage]);
+            setMessages((prev) => mergeMessages(prev, [event.message as unknown as AgentMessage]));
           }
           setStreamingMessage(undefined);
           break;
@@ -239,98 +239,97 @@ function App() {
 
   // Merge all event streams into a single chronological timeline
   // Cap messages to avoid performance degradation on long sessions
-  const timeline = useMemo((): { items: TimelineItem[]; truncated: boolean } => {
+  const timeline = useMemo((): { items: TimelineItem[]; liveItems: TimelineItem[]; truncated: boolean } => {
     const totalMessages = messages.length;
     const visibleMessages = totalMessages > MAX_VISIBLE_MESSAGES
       ? messages.slice(-MAX_VISIBLE_MESSAGES)
       : messages;
 
     const items: TimelineItem[] = [];
+    const liveItems: TimelineItem[] = [];
     // Build a lookup of tool results from toolResult messages, keyed by toolCallId then toolName
     const toolResultMap = new Map<string, ContentBlock[]>();
     const consumedResults = new Set<string>();
+    const toolCallKeys = new Set<string>();
+    const activeToolMap = new Map<string, ToolExecutionEvent>();
+    const consumedActiveTools = new Set<string>();
+
+    for (const tool of toolEvents) {
+      if (tool.toolCallId) activeToolMap.set(tool.toolCallId, tool);
+    }
+
     for (const message of visibleMessages) {
       if (message.role === "toolResult") {
         const key = String(message.toolCallId ?? message.toolName ?? "");
         if (key) toolResultMap.set(key, extractContentBlocks(message));
+        continue;
       }
-    }
-
-    // Pass 1: non-toolResult messages + synthetic tool events from assistant content
-    for (const message of visibleMessages) {
-      if (message.role === "toolResult") continue; // handled in pass 2
-      items.push({ kind: "message", message });
       if (message.role === "assistant") {
-        const blocks = extractContentBlocks(message);
-        for (const block of blocks) {
-          if (block.type === "toolCall" && block.id && block.name) {
-            const exists = toolEvents.some((t) => t.toolCallId === String(block.id));
-            if (!exists) {
-              const callId = String(block.id);
-              const callName = String(block.name);
-              const resultContent = toolResultMap.get(callId) ?? toolResultMap.get(callName);
-              if (resultContent && resultContent.length > 0) {
-                consumedResults.add(callId);
-                consumedResults.add(callName);
-              }
-              items.push({
-                kind: "toolEvent",
-                event: {
-                  toolCallId: callId,
-                  toolName: callName,
-                  args: (block.input ?? block.arguments ?? undefined) as JsonValue | undefined,
-                  timestamp: message.timestamp as number | undefined,
-                  status: "complete",
-                  ...(resultContent && resultContent.length > 0 && { result: { content: resultContent } })
-                }
-              });
-            }
+        for (const block of extractContentBlocks(message)) {
+          if (block.type === "toolCall") {
+            if (block.id) toolCallKeys.add(String(block.id));
+            if (block.name) toolCallKeys.add(String(block.name));
           }
         }
       }
     }
 
-    // Pass 2: unconsumed toolResult messages render as standalone ToolResultBubble
     for (const message of visibleMessages) {
-      if (message.role !== "toolResult") continue;
-      const key = String(message.toolCallId ?? message.toolName ?? "");
-      if (key && consumedResults.has(key)) continue;
+      if (message.role === "toolResult") {
+        const key = String(message.toolCallId ?? message.toolName ?? "");
+        if (key && (consumedResults.has(key) || toolCallKeys.has(key))) continue;
+        items.push({ kind: "message", message });
+        continue;
+      }
+
       items.push({ kind: "message", message });
-    }
-    for (const tool of toolEvents) {
-      items.push({ kind: "toolEvent", event: tool });
-    }
-    for (const event of activityEvents) {
-      items.push({ kind: "activity", event });
-    }
-    const sorted = items.sort((a, b) => {
-      const ta = timelineTimestamp(a) ?? 0;
-      const tb = timelineTimestamp(b) ?? 0;
-      return ta - tb;
-    });
-    // Collapse consecutive tool events (2+) into a single expandable group
-    const collapsed: TimelineItem[] = [];
-    let toolGroup: { kind: "toolEvent"; event: ToolExecutionEvent }[] = [];
-    for (const item of sorted) {
-      if (item.kind === "toolEvent") {
-        toolGroup.push(item);
-      } else {
-        if (toolGroup.length >= 2) {
-          collapsed.push({ kind: "toolGroup", events: toolGroup });
-        } else if (toolGroup.length === 1) {
-          collapsed.push(toolGroup[0]!);
+      if (message.role === "assistant") {
+        const blocks = extractContentBlocks(message);
+        for (const block of blocks) {
+          if (block.type === "toolCall" && block.id && block.name) {
+            const callId = String(block.id);
+            const callName = String(block.name);
+            const activeTool = activeToolMap.get(callId);
+            const resultContent = toolResultMap.get(callId) ?? toolResultMap.get(callName);
+
+            if (resultContent && resultContent.length > 0) {
+              consumedResults.add(callId);
+              consumedResults.add(callName);
+            }
+
+            if (activeTool) {
+              consumedActiveTools.add(callId);
+              items.push({ kind: "toolEvent", event: activeTool });
+              continue;
+            }
+
+            items.push({
+              kind: "toolEvent",
+              event: {
+                toolCallId: callId,
+                toolName: callName,
+                args: (block.input ?? block.arguments ?? undefined) as JsonValue | undefined,
+                timestamp: message.timestamp as number | undefined,
+                status: "complete",
+                ...(resultContent && resultContent.length > 0 && { result: { content: resultContent } })
+              }
+            });
+          }
         }
-        toolGroup = [];
-        collapsed.push(item);
       }
     }
-    if (toolGroup.length >= 2) {
-      collapsed.push({ kind: "toolGroup", events: toolGroup });
-    } else if (toolGroup.length === 1 && toolGroup[0]) {
-      collapsed.push(toolGroup[0]);
+
+    for (const tool of toolEvents) {
+      if (consumedActiveTools.has(tool.toolCallId)) continue;
+      liveItems.push({ kind: "toolEvent", event: tool });
     }
+    for (const event of activityEvents) {
+      liveItems.push({ kind: "activity", event });
+    }
+
     return {
-      items: collapsed,
+      items: collapseToolGroups(items),
+      liveItems: collapseToolGroups(liveItems),
       truncated: totalMessages > MAX_VISIBLE_MESSAGES
     };
   }, [messages, toolEvents, activityEvents]);
@@ -344,7 +343,7 @@ function App() {
 
   async function fetchMessages() {
     const response = await fetch("/api/messages");
-    setMessages((await response.json()) as AgentMessage[]);
+    setMessages(mergeMessages([], (await response.json()) as AgentMessage[]));
   }
 
   async function sendPrompt() {
@@ -352,7 +351,7 @@ function App() {
     if (!message || state.isStreaming) return;
     setDraft("");
     setError(undefined);
-    setMessages((prev) => [...prev, { role: "user", content: message, timestamp: Date.now() }]);
+    setMessages((prev) => [...prev, { id: `local-user-${Date.now()}`, role: "user", content: message, timestamp: Date.now(), localOnly: true }]);
     shouldStickToBottomRef.current = true;
     const response = await fetch("/api/prompt", {
       method: "POST",
@@ -428,22 +427,13 @@ function App() {
                 Older messages are hidden for performance.
               </div>
             )}
-            {timeline.items.map((item, i) => {
-              if (item.kind === "message") {
-                return <MessageBubble key={item.message.id || i} message={item.message} />;
-              }
-              if (item.kind === "toolEvent") {
-                return <ToolExecutionBubble key={`${item.event.toolCallId}-${i}`} tool={item.event} />;
-              }
-              if (item.kind === "toolGroup") {
-                return <ToolGroupBubble key={`tg-${i}`} events={item.events} />;
-              }
-              return <ActivityBubble key={item.event.id} event={item.event} />;
-            })}
+            {timeline.items.map((item, i) => renderTimelineItem(item, i))}
 
             {streamingMessage && streamingMessage.role === "assistant" && (
               <StreamingAssistantBubble message={streamingMessage} />
             )}
+
+            {timeline.liveItems.map((item, i) => renderTimelineItem(item, i, "live"))}
 
             {isCompacting && (
               <div className="compaction-notice">
@@ -1038,6 +1028,114 @@ function extractContentBlocks(message: AgentMessage): ContentBlock[] {
   return text ? [{ type: "text", text }] : [];
 }
 
+function renderTimelineItem(item: TimelineItem, index: number, prefix = "history"): React.ReactNode {
+  if (item.kind === "message") {
+    return <MessageBubble key={`${prefix}-${messageKey(item.message, index)}`} message={item.message} />;
+  }
+  if (item.kind === "toolEvent") {
+    return <ToolExecutionBubble key={`${prefix}-tool-${item.event.toolCallId || index}`} tool={item.event} />;
+  }
+  if (item.kind === "toolGroup") {
+    const ids = item.events.map((event, i) => event.event.toolCallId || i).join(":");
+    return <ToolGroupBubble key={`${prefix}-tg-${ids || index}`} events={item.events} />;
+  }
+  return <ActivityBubble key={`${prefix}-activity-${item.event.id}`} event={item.event} />;
+}
+
+function collapseToolGroups(items: TimelineItem[]): TimelineItem[] {
+  const collapsed: TimelineItem[] = [];
+  let toolGroup: { kind: "toolEvent"; event: ToolExecutionEvent }[] = [];
+
+  for (const item of items) {
+    if (item.kind === "toolEvent") {
+      toolGroup.push(item);
+      continue;
+    }
+
+    flushToolGroup(collapsed, toolGroup);
+    toolGroup = [];
+    collapsed.push(item);
+  }
+
+  flushToolGroup(collapsed, toolGroup);
+  return collapsed;
+}
+
+function flushToolGroup(target: TimelineItem[], toolGroup: { kind: "toolEvent"; event: ToolExecutionEvent }[]) {
+  if (toolGroup.length >= 2) {
+    target.push({ kind: "toolGroup", events: toolGroup });
+  } else if (toolGroup.length === 1 && toolGroup[0]) {
+    target.push(toolGroup[0]);
+  }
+}
+
+function mergeMessages(current: AgentMessage[], incoming: AgentMessage[]): AgentMessage[] {
+  if (current.length === 0) return dedupeMessages(incoming);
+
+  const result = [...current];
+  const seen = new Set(result.map((message, index) => messageKey(message, index)));
+
+  for (const message of incoming) {
+    const key = messageKey(message);
+    if (seen.has(key)) continue;
+
+    const localDuplicateIndex = findLocalUserDuplicate(result, message);
+    if (localDuplicateIndex >= 0) {
+      const previousKey = messageKey(result[localDuplicateIndex]!, localDuplicateIndex);
+      result[localDuplicateIndex] = message;
+      seen.delete(previousKey);
+      seen.add(key);
+      continue;
+    }
+
+    result.push(message);
+    seen.add(key);
+  }
+
+  return dedupeMessages(result);
+}
+
+function dedupeMessages(messages: AgentMessage[]): AgentMessage[] {
+  const result: AgentMessage[] = [];
+  const seen = new Set<string>();
+
+  for (const message of messages) {
+    const key = messageKey(message, result.length);
+    if (seen.has(key)) continue;
+
+    const localDuplicateIndex = findLocalUserDuplicate(result, message);
+    if (localDuplicateIndex >= 0) {
+      const previousKey = messageKey(result[localDuplicateIndex]!, localDuplicateIndex);
+      result[localDuplicateIndex] = message;
+      seen.delete(previousKey);
+    } else {
+      result.push(message);
+    }
+    seen.add(messageKey(message, result.length - 1));
+  }
+
+  return result;
+}
+
+function findLocalUserDuplicate(messages: AgentMessage[], incoming: AgentMessage): number {
+  if (incoming.role !== "user" || Boolean(incoming.localOnly)) return -1;
+  const incomingText = extractText(incoming);
+  if (!incomingText) return -1;
+
+  return messages.findIndex((message) =>
+    message.role === "user" &&
+    Boolean(message.localOnly) &&
+    extractText(message) === incomingText
+  );
+}
+
+function messageKey(message: AgentMessage, fallbackIndex = -1): string {
+  if (typeof message.id === "string") return `id:${message.id}`;
+  if (typeof message.responseId === "string") return `response:${message.responseId}`;
+  if (typeof message.timestamp === "number") return `timestamp:${message.timestamp}:${message.role ?? message.type ?? ""}:${extractText(message)}`;
+  return `content:${message.role ?? message.type ?? ""}:${extractText(message)}:${fallbackIndex}`;
+}
+
 function shouldDisplayActivity(event: ActivityEvent): boolean {
   return event.type !== "turn_start" && event.type !== "turn_end";
 }
@@ -1053,18 +1151,11 @@ function summarizeContentBlocks(blocks: ContentBlock[]): string {
   return "";
 }
 
-function timelineTimestamp(item: TimelineItem): number | undefined {
-  if (item.kind === "message") return item.message.timestamp as number | undefined;
-  if (item.kind === "toolEvent") return item.event.timestamp;
-  if (item.kind === "toolGroup") return item.events[0]?.event.timestamp;
-  return item.event.timestamp;
-}
-
 function appendToolEvent(current: ToolExecutionEvent[], event: ToolExecutionEvent): ToolExecutionEvent[] {
   const idx = current.findIndex((existing) => existing.toolCallId === event.toolCallId);
   if (idx >= 0) {
     const updated = [...current];
-    updated[idx] = { ...current[idx], ...event };
+    updated[idx] = { ...current[idx], ...event, timestamp: current[idx]?.timestamp ?? event.timestamp };
     return updated;
   }
   return [...current, event];

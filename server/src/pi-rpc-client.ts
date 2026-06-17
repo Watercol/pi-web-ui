@@ -10,6 +10,14 @@ type PendingRequest = {
   timer: NodeJS.Timeout;
 };
 
+type TokenStats = SessionStats["tokens"];
+
+type UsageSummary = {
+  tokens: TokenStats;
+  cost: number;
+  hasUsage: boolean;
+};
+
 export type PiRpcClientEvents = {
   event: [event: PiRpcEvent];
   state: [state: PiState];
@@ -36,6 +44,7 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
   private requestCounter = 0;
   private lastStateData: Partial<PiState> = {};
   private messages: AgentMessage[] = [];
+  private readonly streamingUsageMessages = new Map<string, AgentMessage>();
   private lastError: string | undefined;
 
   constructor(private readonly config: ServerConfig) {
@@ -54,6 +63,9 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
     this.child = child;
 
     child.stdout.on("data", (chunk) => this.handleStdout(chunk));
+    child.stdin.on("error", (error) => {
+      this.rejectAll(error);
+    });
     child.stderr.on("data", (chunk) => {
       const message = chunk.toString("utf8").trim();
       if (message) this.setError(stripAnsi(message));
@@ -111,6 +123,7 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
     const response = await this.request("get_state");
     if (response.success && response.data && typeof response.data === "object") {
       this.lastStateData = response.data as Partial<PiState>;
+      this.recomputeStatsFromMessages();
       await this.refreshStats().catch(() => undefined);
       this.emitState();
     }
@@ -124,7 +137,7 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
   async refreshStats(): Promise<SessionStats | undefined> {
     const response = await this.request("get_session_stats");
     if (response.success && response.data) {
-      this.lastStats = response.data as SessionStats;
+      this.setStats(this.normalizeSessionStats(response.data) ?? this.lastStats);
     }
     return this.lastStats;
   }
@@ -134,6 +147,8 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
     if (response.success && response.data && typeof response.data === "object") {
       const data = response.data as { messages?: AgentMessage[] };
       this.messages = Array.isArray(data.messages) ? data.messages : [];
+      this.streamingUsageMessages.clear();
+      this.recomputeStatsFromMessages();
       this.emit("messages", this.messages);
     }
     return this.messages;
@@ -211,6 +226,7 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
       }
     }
     if (!response.success) {
+      if (response.command === "get_session_stats") return;
       this.setError(response.error || response.message || `${response.command || "RPC"} failed`);
     }
   }
@@ -226,6 +242,8 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
       const willRetry = Boolean(event.willRetry);
       if (Array.isArray(messages)) {
         this.messages = messages;
+        this.streamingUsageMessages.clear();
+        this.recomputeStatsFromMessages();
       } else {
         void this.refreshMessages().catch(() => undefined);
       }
@@ -233,13 +251,22 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
       this.emit("agentEnd", messages, willRetry);
     } else if (event.type === "message_start") {
       const msg = this.normalizeStreamingMessage(event.message);
-      if (msg) this.emit("messageStart", msg);
+      if (msg) {
+        this.applyUsageMessage(msg);
+        this.emit("messageStart", msg);
+      }
     } else if (event.type === "message_update" || event.type === "message_partial") {
       const msg = this.normalizeStreamingMessage((event as { message?: unknown }).message);
-      if (msg) this.emit("messageUpdate", msg);
+      if (msg) {
+        this.applyUsageMessage(msg);
+        this.emit("messageUpdate", msg);
+      }
     } else if (event.type === "message_end") {
       const msg = this.normalizeStreamingMessage((event as { message?: unknown }).message);
-      if (msg) this.emit("messageEnd", msg);
+      if (msg) {
+        this.applyUsageMessage(msg);
+        this.emit("messageEnd", msg);
+      }
     } else if (event.type === "tool_execution_start") {
       this.emit("toolStart", {
         toolCallId: String(event.toolCallId ?? ""),
@@ -285,6 +312,177 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
       this.setError(message);
     }
     this.applyActivityEvent(event);
+  }
+
+  private applyUsageMessage(message: StreamingMessage): void {
+    if (!this.extractUsageSummary(message).hasUsage) return;
+    this.streamingUsageMessages.set(this.messageStatsKey(message), message as AgentMessage);
+    if (this.recomputeStatsFromMessages()) this.emitState();
+  }
+
+  private recomputeStatsFromMessages(): boolean {
+    return this.setStats(this.buildStatsFromMessages());
+  }
+
+  private buildStatsFromMessages(): SessionStats | undefined {
+    const messageMap = new Map<string, AgentMessage>();
+    this.messages.forEach((message, index) => {
+      messageMap.set(this.messageStatsKey(message, `history-${index}`), message);
+    });
+    for (const [key, message] of this.streamingUsageMessages) {
+      messageMap.set(key, message);
+    }
+
+    const messages = [...messageMap.values()];
+    const tokens: TokenStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+    let cost = 0;
+    let hasUsage = false;
+    let userMessages = 0;
+    let assistantMessages = 0;
+    let toolCalls = 0;
+    let toolResults = 0;
+
+    for (const message of messages) {
+      const role = typeof message.role === "string" ? message.role : typeof message.type === "string" ? message.type : "";
+      if (role === "user") userMessages += 1;
+      if (role === "assistant") assistantMessages += 1;
+      if (role === "toolResult") toolResults += 1;
+
+      for (const block of this.normalizeContentBlocks(message.content)) {
+        if (block.type === "toolCall") toolCalls += 1;
+      }
+
+      const usage = this.extractUsageSummary(message);
+      if (!usage.hasUsage) continue;
+      hasUsage = true;
+      tokens.input += usage.tokens.input;
+      tokens.output += usage.tokens.output;
+      tokens.cacheRead += usage.tokens.cacheRead;
+      tokens.cacheWrite += usage.tokens.cacheWrite;
+      tokens.total += usage.tokens.total;
+      cost += usage.cost;
+    }
+
+    if (tokens.total === 0) {
+      tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
+    }
+
+    const contextWindow = this.extractContextWindow();
+    if (!hasUsage && !contextWindow) return undefined;
+
+    const promptTokens = tokens.input + tokens.cacheRead + tokens.cacheWrite;
+    return {
+      sessionFile: this.lastStateData.sessionFile,
+      sessionId: this.lastStateData.sessionId || "",
+      userMessages,
+      assistantMessages,
+      toolCalls,
+      toolResults,
+      totalMessages: messages.length,
+      tokens,
+      cost,
+      contextUsage: contextWindow
+        ? {
+            tokens: promptTokens > 0 ? promptTokens : null,
+            contextWindow,
+            percent: promptTokens > 0 ? (promptTokens / contextWindow) * 100 : null
+          }
+        : undefined
+    };
+  }
+
+  private setStats(stats: SessionStats | undefined): boolean {
+    const next = stats ? this.withContextWindow(stats) : undefined;
+    if (JSON.stringify(this.lastStats) === JSON.stringify(next)) return false;
+    this.lastStats = next;
+    return true;
+  }
+
+  private withContextWindow(stats: SessionStats): SessionStats {
+    const contextWindow = stats.contextUsage?.contextWindow || this.extractContextWindow();
+    if (!contextWindow) return stats;
+
+    const promptTokens = stats.contextUsage?.tokens ?? stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite;
+    return {
+      ...stats,
+      contextUsage: {
+        tokens: promptTokens > 0 ? promptTokens : null,
+        contextWindow,
+        percent: promptTokens > 0 ? (promptTokens / contextWindow) * 100 : null
+      }
+    };
+  }
+
+  private normalizeSessionStats(raw: unknown): SessionStats | undefined {
+    if (!raw || typeof raw !== "object") return undefined;
+    const source = raw as Record<string, unknown>;
+    const stats = (source.stats && typeof source.stats === "object" ? source.stats : source) as Record<string, unknown>;
+    const tokenSource = (stats.tokens && typeof stats.tokens === "object" ? stats.tokens : stats) as Record<string, unknown>;
+    const usage = this.extractUsageSummary({ usage: tokenSource, cost: stats.cost } as AgentMessage);
+    const contextUsage = stats.contextUsage && typeof stats.contextUsage === "object"
+      ? stats.contextUsage as Record<string, unknown>
+      : undefined;
+    const contextWindow = toNumber(contextUsage?.contextWindow ?? contextUsage?.context_window ?? stats.contextWindow ?? stats.context_window ?? this.extractContextWindow());
+    const contextTokens = toNumber(contextUsage?.tokens ?? contextUsage?.usedTokens ?? contextUsage?.used_tokens);
+
+    if (!usage.hasUsage && !contextWindow) return undefined;
+    return {
+      sessionFile: typeof stats.sessionFile === "string" ? stats.sessionFile : typeof stats.session_file === "string" ? stats.session_file : this.lastStateData.sessionFile,
+      sessionId: typeof stats.sessionId === "string" ? stats.sessionId : typeof stats.session_id === "string" ? stats.session_id : this.lastStateData.sessionId || "",
+      userMessages: toNumber(stats.userMessages ?? stats.user_messages) ?? 0,
+      assistantMessages: toNumber(stats.assistantMessages ?? stats.assistant_messages) ?? 0,
+      toolCalls: toNumber(stats.toolCalls ?? stats.tool_calls) ?? 0,
+      toolResults: toNumber(stats.toolResults ?? stats.tool_results) ?? 0,
+      totalMessages: toNumber(stats.totalMessages ?? stats.total_messages) ?? this.messages.length,
+      tokens: usage.tokens,
+      cost: usage.cost,
+      contextUsage: contextWindow
+        ? {
+            tokens: contextTokens ?? null,
+            contextWindow,
+            percent: toNumber(contextUsage?.percent) ?? (contextTokens ? (contextTokens / contextWindow) * 100 : null)
+          }
+        : undefined
+    };
+  }
+
+  private extractUsageSummary(raw: unknown): UsageSummary {
+    const empty: UsageSummary = {
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      cost: 0,
+      hasUsage: false
+    };
+    if (!raw || typeof raw !== "object") return empty;
+
+    const source = raw as Record<string, unknown>;
+    const usage = source.usage && typeof source.usage === "object" ? source.usage as Record<string, unknown> : undefined;
+    if (!usage) return empty;
+
+    const input = toNumber(usage.input ?? usage.inputTokens ?? usage.input_tokens ?? usage.promptTokens ?? usage.prompt_tokens) ?? 0;
+    const output = toNumber(usage.output ?? usage.outputTokens ?? usage.output_tokens ?? usage.completionTokens ?? usage.completion_tokens) ?? 0;
+    const cacheRead = toNumber(usage.cacheRead ?? usage.cache_read ?? usage.cacheReadTokens ?? usage.cache_read_tokens ?? usage.cachedTokens ?? usage.cached_tokens) ?? 0;
+    const cacheWrite = toNumber(usage.cacheWrite ?? usage.cache_write ?? usage.cacheWriteTokens ?? usage.cache_write_tokens) ?? 0;
+    const total = toNumber(usage.totalTokens ?? usage.total_tokens ?? usage.total) ?? input + output + cacheRead + cacheWrite;
+
+    return {
+      tokens: { input, output, cacheRead, cacheWrite, total },
+      cost: toCostNumber(usage.cost ?? source.cost),
+      hasUsage: [input, output, cacheRead, cacheWrite, total].some((value) => value > 0)
+    };
+  }
+
+  private extractContextWindow(): number | undefined {
+    const state = this.lastStateData as Record<string, unknown>;
+    const model = state.model && typeof state.model === "object" ? state.model as Record<string, unknown> : undefined;
+    return toNumber(model?.contextWindow ?? model?.context_window ?? state.contextWindow ?? state.context_window);
+  }
+
+  private messageStatsKey(message: AgentMessage | StreamingMessage, fallback = "streaming"): string {
+    const source = message as Record<string, unknown>;
+    if (typeof source.responseId === "string") return `response:${source.responseId}`;
+    if (typeof source.id === "string") return `id:${source.id}`;
+    if (typeof source.timestamp === "number") return `timestamp:${source.timestamp}:${source.role ?? ""}`;
+    return fallback;
   }
 
   private extractContentBlocks(raw: unknown): { content: ContentBlock[]; details?: JsonValue } | undefined {
@@ -435,4 +633,21 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
 function stripAnsi(text: string): string {
   // Strip SGR (Select Graphic Rendition) sequences: ESC[ param ; param m
   return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b\]133;[ABC]\x07/g, "");
+}
+
+function toNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function toCostNumber(value: unknown): number {
+  if (typeof value === "object" && value !== null) {
+    const cost = value as Record<string, unknown>;
+    return toNumber(cost.total) ?? toNumber(cost.amount) ?? 0;
+  }
+  return toNumber(value) ?? 0;
 }
