@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.5 — 2026-06-18
+
+### Added
+- Model switcher: dropdown in the stats bar to view available models and switch
+  providers/models at runtime (`/api/models`, `/api/model`, `get_available_models`,
+  `set_model` RPC)
+- Session switcher: dropdown to list sessions discovered from jsonl files, switch
+  to a different session, or create a new session (`/api/sessions`, `/api/session`,
+  `/api/session/new`, `new_session` / `switch_session` RPC)
+- Thinking level selector: dropdown to set the thinking/reasoning level from off
+  to xhigh, with per-model capability detection (`/api/thinking-level`,
+  `set_thinking_level` RPC)
+- `server/src/sessions.ts`: jsonl-based session listing with first-message preview,
+  message count, and cwd-scoped filtering
+- New shared types: `PiSessionInfo`, `ModelSwitchRequest`, `SessionSwitchRequest`,
+  `ThinkingLevelSwitchRequest`
+
+### Changed
+- `.gitignore`: added `AGENT.md` and `CLAUDE.md`
+
 ## 0.1.4 — 2026-06-17
 
 ### Added
