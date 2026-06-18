@@ -2,12 +2,14 @@ import fs from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { PromptRequest, ServerEvent } from "../../shared/src/index.js";
+import type { ModelSwitchRequest, PromptRequest, ServerEvent, SessionSwitchRequest, ThinkingLevelSwitchRequest } from "../../shared/src/index.js";
 import type { ServerConfig } from "./config.js";
 import type { PiRpcClient } from "./pi-rpc-client.js";
 import { PiRpcClient as PiRpcClientClass } from "./pi-rpc-client.js";
+import { listSessions } from "./sessions.js";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const validThinkingLevels = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 const mimeTypes: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -113,6 +115,57 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, rp
 
   if (req.method === "POST" && url.pathname === "/api/abort") {
     sendJson(res, 200, await rpc.abort());
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/models") {
+    const response = await rpc.getAvailableModels();
+    sendJson(res, 200, response.data ?? { models: [] });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/model") {
+    const body = (await readJson(req)) as ModelSwitchRequest;
+    const provider = typeof body.provider === "string" ? body.provider.trim() : "";
+    const modelId = typeof body.modelId === "string" ? body.modelId.trim() : "";
+    if (!provider || !modelId) {
+      sendJson(res, 400, { error: "Model provider and modelId are required" });
+      return;
+    }
+    sendJson(res, 200, await rpc.setModel(provider, modelId));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/thinking-level") {
+    const body = (await readJson(req)) as ThinkingLevelSwitchRequest;
+    const level = typeof body.level === "string" ? body.level.trim() : "";
+    if (!validThinkingLevels.has(level)) {
+      sendJson(res, 400, { error: "Valid thinking level is required" });
+      return;
+    }
+    sendJson(res, 200, await rpc.setThinkingLevel(level));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/sessions") {
+    const scope = url.searchParams.get("scope") === "all" ? "all" : "current";
+    sendJson(res, 200, { sessions: await listSessions(rpc.getState().cwd, scope) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/session") {
+    const body = (await readJson(req)) as SessionSwitchRequest;
+    const sessionPath = typeof body.sessionPath === "string" ? body.sessionPath.trim() : "";
+    if (!sessionPath) {
+      sendJson(res, 400, { error: "Session path is required" });
+      return;
+    }
+    sendJson(res, 200, await rpc.switchSession(sessionPath));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/session/new") {
+    sendJson(res, 200, await rpc.newSession());
     return;
   }
 

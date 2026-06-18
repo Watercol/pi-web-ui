@@ -1,11 +1,13 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { CircleStop, RefreshCcw, SendHorizontal, Terminal, Wrench, Monitor, FileCode, AlertTriangle, Loader2, ChevronDown, ChevronRight, Info, RotateCcw, Bell } from "lucide-react";
-import type { ActivityEvent, AgentMessage, JsonValue, PiRpcEvent, PiState, ServerEvent, SessionStats, StreamingMessage, ToolExecutionEvent, ContentBlock, QueueState } from "../../shared/src/index.js";
+import { CircleStop, RefreshCcw, SendHorizontal, Terminal, Wrench, Monitor, FileCode, AlertTriangle, Loader2, ChevronDown, ChevronRight, Info, RotateCcw, Bell, Check, Plus } from "lucide-react";
+import type { ActivityEvent, AgentMessage, JsonValue, PiModel, PiRpcEvent, PiSessionInfo, PiState, ServerEvent, SessionStats, StreamingMessage, ToolExecutionEvent, ContentBlock, QueueState } from "../../shared/src/index.js";
 import { marked } from "marked";
 import "./styles.css";
 
 const COMPOSER_MAX_VIEWPORT_RATIO = 0.5;
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+type ThinkingLevel = typeof THINKING_LEVELS[number];
 
 function resizeComposerTextarea(el: HTMLTextAreaElement) {
   el.style.height = "auto";
@@ -13,6 +15,54 @@ function resizeComposerTextarea(el: HTMLTextAreaElement) {
   const nextHeight = Math.min(el.scrollHeight, maxHeight);
   el.style.height = `${nextHeight}px`;
   el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+}
+
+function modelDisplayName(model: PiModel): string {
+  return model.displayName || model.name || model.id || `${model.provider || "model"}`;
+}
+
+function modelKey(model: PiModel): string {
+  const provider = typeof model.provider === "string" ? model.provider : "";
+  const id = typeof model.id === "string" ? model.id : typeof model.name === "string" ? model.name : "";
+  return `${provider}/${id}`;
+}
+
+function thinkingLevelLabel(level: string): string {
+  return level === "xhigh" ? "X High" : level.charAt(0).toUpperCase() + level.slice(1);
+}
+
+function supportedThinkingLevels(model: PiModel | null): ThinkingLevel[] {
+  if (!model) return ["off", "minimal", "low", "medium", "high"];
+  if (model.reasoning === false) return ["off"];
+
+  const map = model.thinkingLevelMap && typeof model.thinkingLevelMap === "object" && !Array.isArray(model.thinkingLevelMap)
+    ? model.thinkingLevelMap as Record<string, JsonValue | undefined>
+    : undefined;
+
+  return THINKING_LEVELS.filter((level) => {
+    const mapped = map?.[level];
+    if (mapped === null) return false;
+    if (level === "xhigh") return mapped !== undefined;
+    return true;
+  });
+}
+
+function sessionDisplayName(session: PiSessionInfo): string {
+  return session.name || session.firstMessage || session.id || "New session";
+}
+
+function formatRelativeTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "";
+  const diffMs = Date.now() - timestamp;
+  const mins = Math.floor(diffMs / 60000);
+  const hours = Math.floor(diffMs / 3600000);
+  const days = Math.floor(diffMs / 86400000);
+  if (mins < 1) return "now";
+  if (mins < 60) return `${mins}m`;
+  if (hours < 24) return `${hours}h`;
+  if (days < 7) return `${days}d`;
+  return new Date(timestamp).toLocaleDateString();
 }
 
 type TimelineItem =
@@ -65,6 +115,9 @@ function App() {
   const isStreamingRef = useRef(false);
   const composingRef = useRef(false);
   const lastStreamUpdateRef = useRef(0);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
+  const sessionMenuRef = useRef<HTMLDivElement>(null);
+  const thinkingMenuRef = useRef<HTMLDivElement>(null);
 
   const MAX_VISIBLE_MESSAGES = 1000;
 
@@ -76,6 +129,18 @@ function App() {
   const [compactionMessage, setCompactionMessage] = useState<string | undefined>();
   const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatus[]>([]);
+  const [models, setModels] = useState<PiModel[]>([]);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [switchingModelKey, setSwitchingModelKey] = useState<string | undefined>();
+  const [sessions, setSessions] = useState<PiSessionInfo[]>([]);
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionScope, setSessionScope] = useState<"current" | "all">("current");
+  const [switchingSessionPath, setSwitchingSessionPath] = useState<string | undefined>();
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [thinkingMenuOpen, setThinkingMenuOpen] = useState(false);
+  const [switchingThinkingLevel, setSwitchingThinkingLevel] = useState<string | undefined>();
 
   const updateExtensionStatus = (event: Extract<ActivityEvent, { type: "extension_ui_request" }>) => {
     const rawText = event.statusText || event.message || event.text || event.title || event.statusKey || "Extension UI update";
@@ -254,6 +319,37 @@ function App() {
     return () => source.close();
   }, []);
 
+  useEffect(() => {
+    if (!modelMenuOpen && !sessionMenuOpen && !thinkingMenuOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!modelMenuRef.current?.contains(event.target as Node)) {
+        setModelMenuOpen(false);
+      }
+      if (!sessionMenuRef.current?.contains(event.target as Node)) {
+        setSessionMenuOpen(false);
+      }
+      if (!thinkingMenuRef.current?.contains(event.target as Node)) {
+        setThinkingMenuOpen(false);
+      }
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setModelMenuOpen(false);
+        setSessionMenuOpen(false);
+        setThinkingMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [modelMenuOpen, sessionMenuOpen, thinkingMenuOpen]);
+
   useLayoutEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -386,6 +482,172 @@ function App() {
     setMessages(mergeMessages([], (await response.json()) as AgentMessage[]));
   }
 
+  async function fetchModels() {
+    setModelsLoading(true);
+    setError(undefined);
+    try {
+      const response = await fetch("/api/models");
+      const body = (await response.json().catch(() => ({}))) as { models?: PiModel[]; error?: string };
+      if (!response.ok) {
+        setError(body.error || `Model list failed with HTTP ${response.status}`);
+        return;
+      }
+      setModels(Array.isArray(body.models) ? body.models : []);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setModelsLoading(false);
+    }
+  }
+
+  async function toggleModelMenu() {
+    setModelMenuOpen((open) => !open);
+    if (!modelMenuOpen && models.length === 0 && !modelsLoading) {
+      await fetchModels();
+    }
+  }
+
+  async function switchModel(model: PiModel) {
+    const provider = typeof model.provider === "string" ? model.provider : "";
+    const modelId = typeof model.id === "string" ? model.id : typeof model.name === "string" ? model.name : "";
+    if (!provider || !modelId || switchingModelKey) return;
+
+    setSwitchingModelKey(modelKey(model));
+    setError(undefined);
+    try {
+      const response = await fetch("/api/model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, modelId })
+      });
+      const body = (await response.json().catch(() => ({}))) as { data?: PiModel; error?: string; message?: string };
+      if (!response.ok || body.error) {
+        setError(body.error || body.message || `Model switch failed with HTTP ${response.status}`);
+      } else {
+        if (body.data) setState((current) => ({ ...current, model: body.data ?? current.model }));
+        setModelMenuOpen(false);
+        await fetchState();
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSwitchingModelKey(undefined);
+    }
+  }
+
+  async function switchThinkingLevel(level: string) {
+    if (switchingThinkingLevel || level === state.thinkingLevel) return;
+
+    setSwitchingThinkingLevel(level);
+    setError(undefined);
+    try {
+      const response = await fetch("/api/thinking-level", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ level })
+      });
+      const body = (await response.json().catch(() => ({}))) as { error?: string; message?: string };
+      if (!response.ok || body.error) {
+        setError(body.error || body.message || `Thinking level switch failed with HTTP ${response.status}`);
+      } else {
+        setState((current) => ({ ...current, thinkingLevel: level }));
+        setThinkingMenuOpen(false);
+        void fetchState();
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSwitchingThinkingLevel(undefined);
+    }
+  }
+
+  async function fetchSessions(scope = sessionScope) {
+    setSessionsLoading(true);
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/sessions?scope=${encodeURIComponent(scope)}`);
+      const body = (await response.json().catch(() => ({}))) as { sessions?: PiSessionInfo[]; error?: string };
+      if (!response.ok) {
+        setError(body.error || `Session list failed with HTTP ${response.status}`);
+        return;
+      }
+      setSessions(Array.isArray(body.sessions) ? body.sessions : []);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSessionsLoading(false);
+    }
+  }
+
+  async function toggleSessionMenu() {
+    setSessionMenuOpen((open) => !open);
+    if (!sessionMenuOpen && sessions.length === 0 && !sessionsLoading) {
+      await fetchSessions();
+    }
+  }
+
+  async function changeSessionScope(scope: "current" | "all") {
+    if (scope === sessionScope) return;
+    setSessionScope(scope);
+    await fetchSessions(scope);
+  }
+
+  async function switchSession(session: PiSessionInfo) {
+    if (switchingSessionPath || creatingSession || session.path === state.sessionFile) return;
+
+    setSwitchingSessionPath(session.path);
+    setError(undefined);
+    try {
+      const response = await fetch("/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionPath: session.path })
+      });
+      const body = (await response.json().catch(() => ({}))) as { data?: { cancelled?: boolean }; error?: string; message?: string };
+      if (!response.ok || body.error) {
+        setError(body.error || body.message || `Session switch failed with HTTP ${response.status}`);
+      } else if (!body.data?.cancelled) {
+        setSessionMenuOpen(false);
+        setStreamingMessage(undefined);
+        setToolEvents([]);
+        setActivityEvents([]);
+        setDisplayStats(undefined);
+        await Promise.all([fetchState(), fetchMessages()]);
+        void fetchSessions();
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSwitchingSessionPath(undefined);
+    }
+  }
+
+  async function newSession() {
+    if (creatingSession || switchingSessionPath) return;
+
+    setCreatingSession(true);
+    setError(undefined);
+    try {
+      const response = await fetch("/api/session/new", { method: "POST" });
+      const body = (await response.json().catch(() => ({}))) as { data?: { cancelled?: boolean }; error?: string; message?: string };
+      if (!response.ok || body.error) {
+        setError(body.error || body.message || `New session failed with HTTP ${response.status}`);
+      } else if (!body.data?.cancelled) {
+        setSessionMenuOpen(false);
+        setStreamingMessage(undefined);
+        setToolEvents([]);
+        setActivityEvents([]);
+        setDisplayStats(undefined);
+        await Promise.all([fetchState(), fetchMessages()]);
+        void fetchSessions();
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCreatingSession(false);
+    }
+  }
+
   async function sendPrompt() {
     const message = draft.trim();
     if (!message || state.isStreaming) return;
@@ -420,8 +682,9 @@ function App() {
   const modelLabel = useMemo(() => {
     const model = state.model;
     if (!model) return "No model";
-    return model.displayName || model.name || model.id || JSON.stringify(model);
+    return modelDisplayName(model);
   }, [state.model]);
+  const thinkingLevels = useMemo(() => supportedThinkingLevels(state.model), [state.model]);
 
   const queueCount = queueState.steering.length + queueState.followUp.length;
 
@@ -438,9 +701,47 @@ function App() {
         <div className="status-grid">
           <Status label="RPC" value={state.processRunning ? "running" : "stopped"} tone={state.processRunning ? "ok" : "bad"} />
           <Status label="SSE" value={connected ? "connected" : "offline"} tone={connected ? "ok" : "bad"} />
-          <Status label="Model" value={modelLabel} />
-          <Status label="Session" value={state.sessionName || state.sessionId || "new"} />
-          <Status label="Thinking" value={state.thinkingLevel || "default"} />
+          <ModelStatus
+            value={modelLabel}
+            currentModel={state.model}
+            models={models}
+            open={modelMenuOpen}
+            loading={modelsLoading}
+            switchingKey={switchingModelKey}
+            disabled={!state.processRunning || state.isStreaming}
+            menuRef={modelMenuRef}
+            onToggle={() => void toggleModelMenu()}
+            onRefresh={() => void fetchModels()}
+            onSelect={(model) => void switchModel(model)}
+          />
+          <SessionStatus
+            value={state.sessionName || state.sessionId || "new"}
+            currentSessionFile={state.sessionFile}
+            sessions={sessions}
+            open={sessionMenuOpen}
+            loading={sessionsLoading}
+            scope={sessionScope}
+            switchingPath={switchingSessionPath}
+            creating={creatingSession}
+            disabled={!state.processRunning || state.isStreaming}
+            menuRef={sessionMenuRef}
+            onToggle={() => void toggleSessionMenu()}
+            onRefresh={() => void fetchSessions()}
+            onScopeChange={(scope) => void changeSessionScope(scope)}
+            onNew={() => void newSession()}
+            onSelect={(session) => void switchSession(session)}
+          />
+          <ThinkingStatus
+            value={thinkingLevelLabel(state.thinkingLevel || "medium")}
+            currentLevel={state.thinkingLevel || "medium"}
+            levels={thinkingLevels}
+            open={thinkingMenuOpen}
+            switchingLevel={switchingThinkingLevel}
+            disabled={!state.processRunning || state.isStreaming}
+            menuRef={thinkingMenuRef}
+            onToggle={() => setThinkingMenuOpen((open) => !open)}
+            onSelect={(level) => void switchThinkingLevel(level)}
+          />
           <Status label="Stream" value={state.isStreaming ? "streaming" : "idle"} tone={state.isStreaming ? "hot" : "ok"} />
         </div>
       </header>
@@ -534,6 +835,263 @@ function Status({ label, value, tone }: { label: string; value: string; tone?: "
     <div className={`status ${tone || ""}`}>
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function ModelStatus({
+  value,
+  currentModel,
+  models,
+  open,
+  loading,
+  switchingKey,
+  disabled,
+  menuRef,
+  onToggle,
+  onRefresh,
+  onSelect
+}: {
+  value: string;
+  currentModel: PiModel | null;
+  models: PiModel[];
+  open: boolean;
+  loading: boolean;
+  switchingKey?: string;
+  disabled: boolean;
+  menuRef: React.RefObject<HTMLDivElement | null>;
+  onToggle: () => void;
+  onRefresh: () => void;
+  onSelect: (model: PiModel) => void;
+}) {
+  const currentKey = currentModel ? modelKey(currentModel) : "";
+  const groupedModels = useMemo(() => {
+    const groups = new Map<string, PiModel[]>();
+    for (const model of models) {
+      const provider = typeof model.provider === "string" && model.provider ? model.provider : "other";
+      groups.set(provider, [...(groups.get(provider) ?? []), model]);
+    }
+    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [models]);
+
+  return (
+    <div className="status model-status" ref={menuRef}>
+      <button type="button" className="status-button" onClick={onToggle} disabled={disabled} title="Switch model">
+        <span>MODEL</span>
+        <strong>{value}</strong>
+        <ChevronDown size={14} className={open ? "chevron open" : "chevron"} />
+      </button>
+      {open && (
+        <div className="model-menu">
+          <div className="model-menu-header">
+            <span>Models</span>
+            <button type="button" className="model-refresh" onClick={onRefresh} disabled={loading} title="Refresh models">
+              {loading ? <Loader2 size={14} className="spinner" /> : <RefreshCcw size={14} />}
+            </button>
+          </div>
+          {loading && models.length === 0 ? (
+            <div className="model-menu-empty">Loading models...</div>
+          ) : groupedModels.length === 0 ? (
+            <div className="model-menu-empty">No models available</div>
+          ) : (
+            <div className="model-list">
+              {groupedModels.map(([provider, providerModels]) => (
+                <div key={provider} className="model-group">
+                  <div className="model-provider">{provider}</div>
+                  {providerModels.map((model) => {
+                    const key = modelKey(model);
+                    const active = key === currentKey;
+                    const switching = key === switchingKey;
+                    return (
+                      <button
+                        type="button"
+                        key={key}
+                        className={`model-option ${active ? "active" : ""}`}
+                        onClick={() => onSelect(model)}
+                        disabled={Boolean(switchingKey) || active}
+                      >
+                        <span className="model-option-icon">
+                          {switching ? <Loader2 size={14} className="spinner" /> : active ? <Check size={14} /> : null}
+                        </span>
+                        <span className="model-option-text">
+                          <strong>{modelDisplayName(model)}</strong>
+                          <small>{model.id || model.name || key}</small>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionStatus({
+  value,
+  currentSessionFile,
+  sessions,
+  open,
+  loading,
+  scope,
+  switchingPath,
+  creating,
+  disabled,
+  menuRef,
+  onToggle,
+  onRefresh,
+  onScopeChange,
+  onNew,
+  onSelect
+}: {
+  value: string;
+  currentSessionFile?: string;
+  sessions: PiSessionInfo[];
+  open: boolean;
+  loading: boolean;
+  scope: "current" | "all";
+  switchingPath?: string;
+  creating: boolean;
+  disabled: boolean;
+  menuRef: React.RefObject<HTMLDivElement | null>;
+  onToggle: () => void;
+  onRefresh: () => void;
+  onScopeChange: (scope: "current" | "all") => void;
+  onNew: () => void;
+  onSelect: (session: PiSessionInfo) => void;
+}) {
+  return (
+    <div className="status model-status session-status" ref={menuRef}>
+      <button type="button" className="status-button" onClick={onToggle} disabled={disabled} title="Manage sessions">
+        <span>SESSION</span>
+        <strong>{value}</strong>
+        <ChevronDown size={14} className={open ? "chevron open" : "chevron"} />
+      </button>
+      {open && (
+        <div className="model-menu session-menu">
+          <div className="model-menu-header session-menu-header">
+            <div className="session-tabs">
+              <button type="button" className={scope === "current" ? "active" : ""} onClick={() => onScopeChange("current")}>
+                Current
+              </button>
+              <button type="button" className={scope === "all" ? "active" : ""} onClick={() => onScopeChange("all")}>
+                All
+              </button>
+            </div>
+            <div className="session-actions">
+              <button type="button" className="model-refresh" onClick={onNew} disabled={creating || Boolean(switchingPath)} title="New session">
+                {creating ? <Loader2 size={14} className="spinner" /> : <Plus size={14} />}
+              </button>
+              <button type="button" className="model-refresh" onClick={onRefresh} disabled={loading} title="Refresh sessions">
+                {loading ? <Loader2 size={14} className="spinner" /> : <RefreshCcw size={14} />}
+              </button>
+            </div>
+          </div>
+          {loading && sessions.length === 0 ? (
+            <div className="model-menu-empty">Loading sessions...</div>
+          ) : sessions.length === 0 ? (
+            <div className="model-menu-empty">No sessions found</div>
+          ) : (
+            <div className="model-list session-list">
+              {sessions.map((session) => {
+                const active = Boolean(currentSessionFile && session.path === currentSessionFile);
+                const switching = switchingPath === session.path;
+                return (
+                  <button
+                    type="button"
+                    key={session.path}
+                    className={`model-option session-option ${active ? "active" : ""}`}
+                    onClick={() => onSelect(session)}
+                    disabled={Boolean(switchingPath) || creating || active}
+                    title={session.path}
+                  >
+                    <span className="model-option-icon">
+                      {switching ? <Loader2 size={14} className="spinner" /> : active ? <Check size={14} /> : null}
+                    </span>
+                    <span className="model-option-text session-option-text">
+                      <strong>{sessionDisplayName(session)}</strong>
+                      <small>
+                        {formatRelativeTime(session.modified)}
+                        {session.messageCount > 0 ? ` · ${session.messageCount} messages` : ""}
+                      </small>
+                      {scope === "all" && <small>{session.cwd}</small>}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThinkingStatus({
+  value,
+  currentLevel,
+  levels,
+  open,
+  switchingLevel,
+  disabled,
+  menuRef,
+  onToggle,
+  onSelect
+}: {
+  value: string;
+  currentLevel: string;
+  levels: string[];
+  open: boolean;
+  switchingLevel?: string;
+  disabled: boolean;
+  menuRef: React.RefObject<HTMLDivElement | null>;
+  onToggle: () => void;
+  onSelect: (level: string) => void;
+}) {
+  return (
+    <div className="status model-status thinking-status" ref={menuRef}>
+      <button type="button" className="status-button" onClick={onToggle} disabled={disabled} title="Switch thinking level">
+        <span>THINKING</span>
+        <strong>{value}</strong>
+        <ChevronDown size={14} className={open ? "chevron open" : "chevron"} />
+      </button>
+      {open && (
+        <div className="model-menu thinking-menu">
+          <div className="model-menu-header">
+            <span>Thinking</span>
+          </div>
+          {levels.length === 0 ? (
+            <div className="model-menu-empty">No thinking levels available</div>
+          ) : (
+            <div className="model-list thinking-list">
+              {levels.map((level) => {
+                const active = level === currentLevel;
+                const switching = level === switchingLevel;
+                return (
+                  <button
+                    type="button"
+                    key={level}
+                    className={`model-option thinking-option ${active ? "active" : ""}`}
+                    onClick={() => onSelect(level)}
+                    disabled={Boolean(switchingLevel) || active}
+                  >
+                    <span className="model-option-icon">
+                      {switching ? <Loader2 size={14} className="spinner" /> : active ? <Check size={14} /> : null}
+                    </span>
+                    <span className="model-option-text">
+                      <strong>{thinkingLevelLabel(level)}</strong>
+                      <small>{level === "off" ? "Disable model reasoning" : `${level} thinking mode`}</small>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

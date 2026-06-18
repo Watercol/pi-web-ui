@@ -1,8 +1,23 @@
 #!/usr/bin/env node
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import process from "node:process";
 
 let buffer = "";
 const writes = [];
+let currentModel = { id: "fake/model", provider: "fake", contextWindow: 100000, reasoning: true, thinkingLevelMap: { xhigh: "max" } };
+let currentThinkingLevel = "medium";
+let currentSession = {
+  id: "fake-session",
+  name: "Fake session",
+  file: createSessionFile("fake-session", "Fake session", "hello from fake session")
+};
+const models = [
+  currentModel,
+  { id: "fake/fast", provider: "fake", contextWindow: 32000, reasoning: false },
+  { id: "other/model", provider: "other", contextWindow: 64000, reasoning: true, thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: "high" } }
+];
 
 process.stdin.on("data", (chunk) => {
   buffer += chunk.toString("utf8");
@@ -29,15 +44,66 @@ function handle(command) {
       command: "get_state",
       success: true,
       data: {
-        model: { id: "fake/model", provider: "fake", contextWindow: 100000 },
-        thinkingLevel: "medium",
+        model: currentModel,
+        thinkingLevel: currentThinkingLevel,
         isStreaming: false,
-        sessionId: "fake-session",
+        sessionFile: currentSession.file,
+        sessionId: currentSession.id,
+        sessionName: currentSession.name,
         autoCompactionEnabled: true,
         messageCount: 0,
         pendingMessageCount: 0
       }
     });
+    return;
+  }
+
+  if (command.type === "new_session") {
+    currentSession = {
+      id: `fake-session-${Date.now()}`,
+      name: undefined,
+      file: createSessionFile(`fake-session-${Date.now()}`, undefined, "")
+    };
+    send({ id: command.id, type: "response", command: "new_session", success: true, data: { cancelled: false } });
+    return;
+  }
+
+  if (command.type === "switch_session") {
+    currentSession = {
+      id: "switched-session",
+      name: "Switched session",
+      file: command.sessionPath
+    };
+    send({ id: command.id, type: "response", command: "switch_session", success: true, data: { cancelled: false } });
+    return;
+  }
+
+  if (command.type === "get_available_models") {
+    send({
+      id: command.id,
+      type: "response",
+      command: "get_available_models",
+      success: true,
+      data: { models }
+    });
+    return;
+  }
+
+  if (command.type === "set_model") {
+    const model = models.find((candidate) => candidate.provider === command.provider && candidate.id === command.modelId);
+    if (!model) {
+      send({ id: command.id, type: "response", command: "set_model", success: false, error: `Model not found: ${command.provider}/${command.modelId}` });
+      return;
+    }
+    currentModel = model;
+    send({ id: command.id, type: "response", command: "set_model", success: true, data: model });
+    return;
+  }
+
+  if (command.type === "set_thinking_level") {
+    currentThinkingLevel = command.level;
+    send({ id: command.id, type: "response", command: "set_thinking_level", success: true });
+    send({ type: "thinking_level_changed", level: currentThinkingLevel });
     return;
   }
 
@@ -109,4 +175,31 @@ function handle(command) {
   }
 
   send({ id: command.id, type: "response", command: command.type, success: false, error: "unknown command" });
+}
+
+function createSessionFile(id, name, userMessage) {
+  const cwd = process.cwd();
+  const agentDir = process.env.PI_CODING_AGENT_DIR || process.env.PI_AGENT_DIR;
+  const sessionsDir = agentDir
+    ? path.join(agentDir, "sessions")
+    : path.join(tmpdir(), "pi-web-ui-fake-agent", "sessions");
+  const safePath = `--${path.resolve(cwd).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+  const dir = path.join(sessionsDir, safePath);
+  mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${Date.now()}_${id}.jsonl`);
+  const now = new Date().toISOString();
+  writeFileSync(file, `${JSON.stringify({ type: "session", id, timestamp: now, cwd })}\n`);
+  if (name) {
+    appendFileSync(file, `${JSON.stringify({ type: "session_info", id: `${id}-name`, parentId: null, timestamp: now, name })}\n`);
+  }
+  if (userMessage) {
+    appendFileSync(file, `${JSON.stringify({
+      type: "message",
+      id: `${id}-message`,
+      parentId: null,
+      timestamp: now,
+      message: { role: "user", content: userMessage, timestamp: Date.now() }
+    })}\n`);
+  }
+  return file;
 }

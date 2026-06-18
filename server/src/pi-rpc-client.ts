@@ -166,6 +166,46 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
     return response;
   }
 
+  async getAvailableModels(): Promise<PiRpcResponse> {
+    return this.request("get_available_models");
+  }
+
+  async setModel(provider: string, modelId: string): Promise<PiRpcResponse> {
+    const response = await this.request("set_model", { provider, modelId });
+    if (response.success && response.data && typeof response.data === "object") {
+      this.lastStateData = { ...this.lastStateData, model: response.data as PiState["model"] };
+      this.recomputeStatsFromMessages();
+      this.emitState();
+    } else {
+      void this.refreshState().catch(() => undefined);
+    }
+    return response;
+  }
+
+  async setThinkingLevel(level: string): Promise<PiRpcResponse> {
+    const response = await this.request("set_thinking_level", { level });
+    if (response.success) {
+      this.lastStateData = { ...this.lastStateData, thinkingLevel: level };
+      this.emitState();
+      void this.refreshState().catch(() => undefined);
+    } else {
+      void this.refreshState().catch(() => undefined);
+    }
+    return response;
+  }
+
+  async newSession(): Promise<PiRpcResponse> {
+    const response = await this.request("new_session");
+    await this.refreshAfterSessionChange(response);
+    return response;
+  }
+
+  async switchSession(sessionPath: string): Promise<PiRpcResponse> {
+    const response = await this.request("switch_session", { sessionPath });
+    await this.refreshAfterSessionChange(response);
+    return response;
+  }
+
   request(type: string, payload: Record<string, JsonValue | undefined> = {}, timeoutMs = 30_000): Promise<PiRpcResponse> {
     if (!this.child || !this.child.stdin.writable) {
       return Promise.reject(new Error("Pi RPC process is not running"));
@@ -197,6 +237,18 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
       }
       this.handleMessage(result.value);
     }
+  }
+
+  private async refreshAfterSessionChange(response: PiRpcResponse): Promise<void> {
+    const data = response.data && typeof response.data === "object" ? response.data as Record<string, unknown> : undefined;
+    if (!response.success || data?.cancelled === true) return;
+    this.messages = [];
+    this.streamingUsageMessages.clear();
+    this.lastStats = undefined;
+    await this.refreshState().catch(() => undefined);
+    await this.refreshMessages().catch(() => undefined);
+    await this.refreshStats().catch(() => undefined);
+    this.emitState();
   }
 
   private handleMessage(value: unknown): void {

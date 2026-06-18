@@ -76,6 +76,18 @@ export type PiState = {
   stats?: SessionStats;
 };
 
+export type PiSessionInfo = {
+  path: string;
+  id: string;
+  cwd: string;
+  name?: string;
+  parentSessionPath?: string;
+  created: string;
+  modified: string;
+  messageCount: number;
+  firstMessage: string;
+};
+
 export type AgentMessage = {
   id?: string;
   role?: string;
@@ -158,4 +170,17 @@ export type ServerEvent =
 
 export type PromptRequest = {
   message: string;
+};
+
+export type ModelSwitchRequest = {
+  provider: string;
+  modelId: string;
+};
+
+export type SessionSwitchRequest = {
+  sessionPath: string;
+};
+
+export type ThinkingLevelSwitchRequest = {
+  level: string;
 };
