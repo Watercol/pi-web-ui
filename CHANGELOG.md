@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.6 — 2026-06-19
+
+### Added
+- Execution trace: assistant thinking blocks and tool calls merged into a structured
+  trace card with foldable sections and live streaming status
+- `CompactToolGroup`: completed tools collapsed into a one-line summary in the
+  streaming trace to reduce visual noise
+- `ToolExecutionBubble` collapsed mode: complete non-error tools shown as a
+  single-line `<details>` expandable
+- Server error handling: graceful `EADDRINUSE` error with actionable port-change
+  hint; correct port display when binding to port 0
+- `hasAssistantDisplayContent`: helper to filter out pure-trace assistant messages
+  from duplicative rendering
+
+### Changed
+- `StreamingAssistantBubble` replaced by `StreamingAssistantCard` with integrated
+  trace header (thinking + tool counts, live status icon)
+- Streaming text throttle (~30fps) now exempts trace shape changes, keeping
+  thinking/tool order immediately up-to-date
+- Successful auto-retry notices auto-dismiss after 5 seconds
+- Pending `willRetry` cards cleaned up when actual retry flow starts
+
 ## 0.1.5 — 2026-06-18
 
 ### Added
