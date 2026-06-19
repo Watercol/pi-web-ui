@@ -67,9 +67,20 @@ function formatRelativeTime(value: string): string {
 
 type TimelineItem =
   | { kind: "message"; message: AgentMessage }
+  | { kind: "trace"; trace: ExecutionTrace }
   | { kind: "toolEvent"; event: ToolExecutionEvent }
   | { kind: "toolGroup"; events: { kind: "toolEvent"; event: ToolExecutionEvent }[] }
   | { kind: "activity"; event: ActivityEvent };
+
+type ExecutionTrace = {
+  id: string;
+  entries: TraceEntry[];
+  active?: boolean;
+};
+
+type TraceEntry =
+  | { kind: "thinking"; block: ContentBlock; key: string }
+  | { kind: "tool"; event: ToolExecutionEvent; key: string };
 
 type ExtensionStatus = {
   key: string;
@@ -115,6 +126,7 @@ function App() {
   const isStreamingRef = useRef(false);
   const composingRef = useRef(false);
   const lastStreamUpdateRef = useRef(0);
+  const lastTraceShapeRef = useRef("");
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const sessionMenuRef = useRef<HTMLDivElement>(null);
   const thinkingMenuRef = useRef<HTMLDivElement>(null);
@@ -172,19 +184,33 @@ function App() {
       return;
     }
 
+    // Auto-dismiss successful retry end notices after 5 seconds
+    if (event.type === "auto_retry_end" && event.success) {
+      setTimeout(() => {
+        setActivityEvents((prev) => prev.filter((a) => a.id !== event.id));
+      }, 5000);
+    }
+
     setActivityEvents((prev) => {
+      // Clean "retry pending" cards (agent_end willRetry) when actual retry flow starts
+      let filtered = prev;
+      if (event.type === "auto_retry_start") {
+        filtered = prev.filter(
+          (a) => !(a.type === "unknown" && "willRetry" in (a.event || {}) && (a.event as Record<string, unknown>).willRetry)
+        );
+      }
       // Replace matching retry start with its end event to keep a single card
       if (event.type === "auto_retry_end") {
-        const idx = prev.findIndex(
+        const idx = filtered.findIndex(
           (a) => a.type === "auto_retry_start" && a.attempt === event.attempt
         );
         if (idx >= 0) {
-          const updated = [...prev];
+          const updated = [...filtered];
           updated[idx] = event;
           return updated;
         }
       }
-      return [...prev, event].slice(-40);
+      return [...filtered, event].slice(-40);
     });
   };
 
@@ -238,6 +264,7 @@ function App() {
           isStreamingRef.current = true;
           setStreamingMessage(undefined);
           setToolEvents([]);
+          lastTraceShapeRef.current = "";
           setIsCompacting(false);
           setCompactionMessage(undefined);
           break;
@@ -257,14 +284,17 @@ function App() {
         case "message_start":
           // Skip toolResult messages — they're already shown via ToolExecutionBubble
           if (event.message.role === "toolResult") break;
+          lastTraceShapeRef.current = traceShapeKey(event.message.content);
           setStreamingMessage(event.message);
           break;
         case "message_update":
           // Throttle streaming text updates to ~30fps to avoid excessive re-renders.
-          // Tool call blocks are still processed immediately.
+          // Trace shape changes are still processed immediately so thinking/tool order stays stable.
           {
             const now = Date.now();
             const needsThrottle = now - lastStreamUpdateRef.current < 32;
+            const traceShape = traceShapeKey(event.message.content);
+            const traceShapeChanged = traceShape !== lastTraceShapeRef.current;
             // Always process tool calls regardless of throttle
             for (const block of event.message.content) {
               if (block.type === "toolCall" && block.id) {
@@ -277,8 +307,9 @@ function App() {
                 }));
               }
             }
-            if (!needsThrottle) {
+            if (!needsThrottle || traceShapeChanged) {
               lastStreamUpdateRef.current = now;
+              lastTraceShapeRef.current = traceShape;
               setStreamingMessage(event.message);
             }
           }
@@ -417,11 +448,16 @@ function App() {
         continue;
       }
 
-      items.push({ kind: "message", message });
       if (message.role === "assistant") {
         const blocks = extractContentBlocks(message);
-        for (const block of blocks) {
-          if (block.type === "toolCall" && block.id && block.name) {
+        const trace: ExecutionTrace = {
+          id: messageKey(message),
+          entries: []
+        };
+        for (const [blockIndex, block] of blocks.entries()) {
+          if (block.type === "thinking") {
+            trace.entries.push({ kind: "thinking", block, key: `thinking-${blockIndex}` });
+          } else if (block.type === "toolCall" && block.id && block.name) {
             const callId = String(block.id);
             const callName = String(block.name);
             const activeTool = activeToolMap.get(callId);
@@ -434,23 +470,27 @@ function App() {
 
             if (activeTool) {
               consumedActiveTools.add(callId);
-              items.push({ kind: "toolEvent", event: activeTool });
+              trace.entries.push({ kind: "tool", event: activeTool, key: `tool-${callId}` });
               continue;
             }
 
-            items.push({
-              kind: "toolEvent",
-              event: {
+            trace.entries.push({ kind: "tool", key: `tool-${callId}`, event: {
                 toolCallId: callId,
                 toolName: callName,
                 args: (block.input ?? block.arguments ?? undefined) as JsonValue | undefined,
                 timestamp: message.timestamp as number | undefined,
                 status: "complete",
                 ...(resultContent && resultContent.length > 0 && { result: { content: resultContent } })
-              }
-            });
+            } });
           }
         }
+        if (trace.entries.length > 0) {
+          items.push({ kind: "trace", trace });
+        }
+      }
+
+      if (message.role !== "assistant" || hasAssistantDisplayContent(message)) {
+        items.push({ kind: "message", message });
       }
     }
 
@@ -777,10 +817,15 @@ function App() {
             {timeline.items.map((item, i) => renderTimelineItem(item, i))}
 
             {streamingMessage && streamingMessage.role === "assistant" && (
-              <StreamingAssistantBubble message={streamingMessage} />
+              <StreamingAssistantCard
+                trace={buildStreamingTrace(streamingMessage, toolEvents)}
+                message={streamingMessage}
+              />
             )}
 
-            {timeline.liveItems.map((item, i) => renderTimelineItem(item, i, "live"))}
+            {timeline.liveItems
+              .filter((item) => streamingMessage?.role !== "assistant" || item.kind === "activity")
+              .map((item, i) => renderTimelineItem(item, i, "live"))}
 
             {isCompacting && (
               <div className="compaction-notice">
@@ -1140,10 +1185,8 @@ function UserBubble({ message }: { message: AgentMessage }) {
 // ============================================================================
 function AssistantBubble({ message }: { message: AgentMessage }) {
   const contentBlocks = extractContentBlocks(message);
-  const [showThinking, setShowThinking] = useState(true);
 
   const textBlocks = contentBlocks.filter((b) => b.type === "text");
-  const thinkingBlocks = contentBlocks.filter((b) => b.type === "thinking");
   const imageBlocks = contentBlocks.filter((b) => b.type === "image");
   const otherBlocks = contentBlocks.filter((b) => !["text", "thinking", "toolCall", "image"].includes(b.type));
 
@@ -1156,21 +1199,6 @@ function AssistantBubble({ message }: { message: AgentMessage }) {
         {String(message.stopReason) === "error" && <span className="badge badge-error">Error</span>}
       </div>
       <div className="message-body">
-        {thinkingBlocks.length > 0 && (
-          <div className="thinking-section">
-            <button className="thinking-toggle" onClick={() => setShowThinking(!showThinking)}>
-              {showThinking ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              {showThinking ? "Hide thinking" : `Thinking (${thinkingBlocks.length} block${thinkingBlocks.length > 1 ? "s" : ""})`}
-            </button>
-            {showThinking && (
-              <div className="thinking-content">
-                {thinkingBlocks.map((b, i) => (
-                  <pre key={i}>{b.thinking}</pre>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
         {textBlocks.map((b, i) => (
           <Markdown key={i} text={b.text || ""} />
         ))}
@@ -1185,19 +1213,98 @@ function AssistantBubble({ message }: { message: AgentMessage }) {
 }
 
 // ============================================================================
-// Streaming assistant message
+// Streaming trace: merge consecutive completed tools into compact groups
 // ============================================================================
-function StreamingAssistantBubble({ message }: { message: StreamingMessage }) {
-  const [showThinking, setShowThinking] = useState(true);
 
-  const textBlocks = message.content.filter((b) => b.type === "text");
-  const thinkingBlocks = message.content.filter((b) => b.type === "thinking");
-  const imageBlocks = message.content.filter((b) => b.type === "image");
-  const otherBlocks = message.content.filter((b) => !["text", "thinking", "toolCall", "image"].includes(b.type));
-  const hasToolCalls = message.content.some((b) => b.type === "toolCall");
+function CompactToolGroup({ tools, names }: { tools: { event: ToolExecutionEvent; key: string }[]; names: string }) {
+  const [expanded, setExpanded] = useState(false);
 
   return (
-    <article className={`message assistant streaming${hasToolCalls ? " has-tools" : ""}`}>
+    <div className="compact-tool-group">
+      <button className="compact-tool-group-toggle" onClick={() => setExpanded(!expanded)}>
+        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <Wrench size={10} />
+        <span>{tools.length} tool{tools.length !== 1 ? "s" : ""}</span>
+        <span className="compact-tool-group-names">{names}</span>
+      </button>
+      {expanded && (
+        <div className="compact-tool-group-items">
+          {tools.map((t) => (
+            <ToolExecutionBubble key={t.key} tool={t.event} collapsed />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderMergedEntries(entries: TraceEntry[]): React.ReactNode[] {
+  const result: React.ReactNode[] = [];
+  const completedTools: { event: ToolExecutionEvent; key: string }[] = [];
+
+  for (const entry of entries) {
+    if (entry.kind === "thinking") {
+      result.push(<pre key={entry.key}>{entry.block.thinking || ""}</pre>);
+      continue;
+    }
+    // Tool entry: running/pending/error stay inline; completed tools go to bottom group
+    const tool = entry.event;
+    const isDone = tool.status === "complete" || (!tool.status && !!tool.result);
+    if (isDone && !tool.isError) {
+      completedTools.push({ event: tool, key: entry.key });
+    } else {
+      result.push(<ToolExecutionBubble key={entry.key} tool={tool} />);
+    }
+  }
+
+  if (completedTools.length > 0) {
+    const names = completedTools.map((t) => t.event.toolName).filter(Boolean).join(", ");
+    const key = completedTools.map((t) => t.key).join("-");
+    result.push(<CompactToolGroup key={key} tools={completedTools} names={names} />);
+  }
+
+  return result;
+}
+
+// ============================================================================
+// Streaming assistant card (trace + text in one card)
+// ============================================================================
+function StreamingAssistantCard({ trace, message }: { trace: ExecutionTrace; message: StreamingMessage }) {
+  const [expanded, setExpanded] = useState(true);
+  const entries = trace.entries;
+  const thinkingCount = entries.filter((e) => e.kind === "thinking").length;
+  const toolCount = entries.filter((e) => e.kind === "tool").length;
+  const toolEntries = entries.filter((e) => e.kind === "tool") as Extract<TraceEntry, { kind: "tool" }>[];
+  const hasRunning = toolEntries.some((e) => e.event.status === "running" || e.event.status === "pending");
+
+  const textBlocks = message.content.filter((b) => b.type === "text");
+  const imageBlocks = message.content.filter((b) => b.type === "image");
+  const otherBlocks = message.content.filter((b) => !["text", "thinking", "toolCall", "image"].includes(b.type));
+
+  const toolNames = toolEntries.map((e) => e.event.toolName).filter(Boolean).join(", ");
+  const parts = [
+    thinkingCount > 0 ? `${thinkingCount} thinking` : "",
+    toolCount > 0 ? `${toolCount} action${toolCount === 1 ? "" : "s"}` : ""
+  ].filter(Boolean);
+  const hasTrace = thinkingCount > 0 || toolCount > 0;
+
+  return (
+    <article className={`message assistant streaming${toolCount > 0 ? " has-tools" : ""}`}>
+      {hasTrace && (
+        <>
+          <button className="trace-toggle" onClick={() => setExpanded(!expanded)}>
+            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            {hasRunning ? <Loader2 size={12} className="spinner" /> : <Wrench size={12} />}
+            <span>Working</span>
+            <span className="trace-summary">{parts.join(" · ")}{toolNames ? ` · ${toolNames}` : ""}</span>
+          </button>
+          {expanded && (
+            <div className="streaming-trace-body">
+              {renderMergedEntries(entries)}
+            </div>
+          )}
+        </>
+      )}
       <div className="message-role">
         <Loader2 size={12} className="spinner" />
         Assistant streaming...
@@ -1205,30 +1312,15 @@ function StreamingAssistantBubble({ message }: { message: StreamingMessage }) {
         {message.stopReason === "error" && <span className="badge badge-error">Error</span>}
       </div>
       <div className="message-body">
-        {thinkingBlocks.length > 0 && (
-          <div className="thinking-section">
-            <button className="thinking-toggle" onClick={() => setShowThinking(!showThinking)}>
-              {showThinking ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              {showThinking ? "Hide thinking" : `Thinking (${thinkingBlocks.length} block${thinkingBlocks.length > 1 ? "s" : ""})`}
-            </button>
-            {showThinking && (
-              <div className="thinking-content">
-                {thinkingBlocks.map((b, i) => (
-                  <pre key={i}>{b.thinking}</pre>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
         {textBlocks.map((b, i) => (
           <Markdown key={i} text={b.text || ""} />
         ))}
         {imageBlocks.length > 0 && <ResultContent blocks={imageBlocks} />}
         {otherBlocks.length > 0 && <ResultContent blocks={otherBlocks} />}
-        {!hasToolCalls && message.stopReason === "aborted" && (
+        {!hasTrace && message.stopReason === "aborted" && (
           <div className="assistant-error">{message.errorMessage || "Operation aborted"}</div>
         )}
-        {!hasToolCalls && message.stopReason === "error" && (
+        {!hasTrace && message.stopReason === "error" && (
           <div className="assistant-error">Error: {message.errorMessage || "Unknown error"}</div>
         )}
       </div>
@@ -1239,6 +1331,57 @@ function StreamingAssistantBubble({ message }: { message: StreamingMessage }) {
 // ============================================================================
 // Tool execution bubble
 // ============================================================================
+
+function TraceBubble({ trace, defaultExpanded = false, active = false }: { trace: ExecutionTrace; defaultExpanded?: boolean; active?: boolean }) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const thinkingBlocks = trace.entries.filter((e) => e.kind === "thinking").map((e) => e.block);
+  const toolEvents = trace.entries.filter((e) => e.kind === "tool").map((e) => e.event);
+  const thinkingCount = thinkingBlocks.length;
+  const toolCount = toolEvents.length;
+  const hasRunning = active || toolEvents.some((tool) => tool.status === "running" || tool.status === "pending");
+  const parts = [
+    thinkingCount > 0 ? `${thinkingCount} thinking` : "",
+    toolCount > 0 ? `${toolCount} action${toolCount === 1 ? "" : "s"}` : ""
+  ].filter(Boolean);
+  const toolNames = toolEvents.map((tool) => tool.toolName).filter(Boolean).join(", ");
+
+  if (thinkingCount === 0 && toolCount === 0) return null;
+
+  return (
+    <article className={`message trace${hasRunning ? " active" : ""}`}>
+      <button className="trace-toggle" onClick={() => setExpanded(!expanded)}>
+        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        {hasRunning ? <Loader2 size={12} className="spinner" /> : <Wrench size={12} />}
+        <span>{active ? "Working" : "Trace"}</span>
+        <span className="trace-summary">{parts.join(" · ")}{toolNames ? ` · ${toolNames}` : ""}</span>
+      </button>
+      {expanded && (
+        <div className="trace-body">
+          {thinkingCount > 0 && (
+            <div className="thinking-section trace-thinking">
+              <div className="trace-section-label">Thinking</div>
+              <div className="thinking-content">
+                {thinkingBlocks.map((block, i) => (
+                  <pre key={i}>{block.thinking || ""}</pre>
+                ))}
+              </div>
+            </div>
+          )}
+          {toolCount > 0 && (
+            <div className="trace-tools">
+              <div className="trace-section-label">Actions</div>
+              <div className="trace-tool-list">
+                {toolEvents.map((tool, i) => (
+                  <ToolExecutionBubble key={tool.toolCallId || i} tool={tool} />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
 
 function ToolGroupBubble({ events }: { events: { kind: "toolEvent"; event: ToolExecutionEvent }[] }) {
   const [expanded, setExpanded] = useState(false);
@@ -1265,16 +1408,33 @@ function ToolGroupBubble({ events }: { events: { kind: "toolEvent"; event: ToolE
   );
 }
 
-function ToolExecutionBubble({ tool }: { tool: ToolExecutionEvent }) {
+function formatArgSummary(args: JsonValue | undefined): string {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return "";
+  const entries = Object.entries(args as Record<string, unknown>).filter(([, v]) => v !== undefined);
+  if (entries.length === 0) return "";
+  const [k, v] = entries[0];
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  return `${k}: ${s.length > 80 ? s.slice(0, 77) + "..." : s}`;
+}
+
+function ToolExecutionBubble({ tool, collapsed }: { tool: ToolExecutionEvent; collapsed?: boolean }) {
   const ss = tool.status;
   const hasResult = !!(tool.result || tool.partialResult);
   const isPending = ss === "pending";
   const isRunning = ss === "running" || (!ss && hasResult && !tool.result);
   const isDone = ss === "complete" || (!ss && !!tool.result);
   const tone = tool.isError ? "error" : isDone ? "success" : isRunning ? "pending" : "pending";
+  const shouldCollapse = collapsed && isDone && !tool.isError && hasResult;
+
+  const body = (
+    <div className="message-body">
+      {tool.args && <ToolArgsTable args={tool.args} />}
+      {hasResult && <ToolResultDetails blocks={tool.result?.content || tool.partialResult?.content || []} isPartial={isRunning} />}
+    </div>
+  );
 
   return (
-    <article className={`message tool-execution ${tone}`}>
+    <article className={`message tool-execution ${tone}${shouldCollapse ? " tool-collapsed" : ""}`}>
       <div className="message-role">
         {isRunning ? <Loader2 size={12} className="spinner" /> : isPending ? <Loader2 size={12} /> : <Wrench size={12} />}
         {tool.toolName}
@@ -1283,10 +1443,14 @@ function ToolExecutionBubble({ tool }: { tool: ToolExecutionEvent }) {
         {tool.isError && <span className="badge badge-error">error</span>}
         {isDone && !tool.isError && <span className="badge badge-ok">done</span>}
       </div>
-      <div className="message-body">
-        {tool.args && <ToolArgsTable args={tool.args} />}
-        {hasResult && <ToolResultDetails blocks={tool.result?.content || tool.partialResult?.content || []} isPartial={isRunning} />}
-      </div>
+      {shouldCollapse ? (
+        <details className="tool-collapsed-details">
+          <summary>{formatArgSummary(tool.args)}</summary>
+          {body}
+        </details>
+      ) : (
+        body
+      )}
     </article>
   );
 }
@@ -1632,9 +1796,76 @@ function extractContentBlocks(message: AgentMessage): ContentBlock[] {
   return text ? [{ type: "text", text }] : [];
 }
 
+function buildStreamingTrace(message: StreamingMessage, toolEvents: ToolExecutionEvent[]): ExecutionTrace {
+  const toolCallIds = new Set<string>();
+  const toolMap = new Map<string, ToolExecutionEvent>();
+  const entries: TraceEntry[] = [];
+
+  for (const tool of toolEvents) {
+    if (tool.toolCallId) toolMap.set(tool.toolCallId, tool);
+  }
+
+  for (const [blockIndex, block] of message.content.entries()) {
+    if (block.type === "thinking") {
+      entries.push({ kind: "thinking", block, key: `thinking-${blockIndex}` });
+      continue;
+    }
+    if (block.type !== "toolCall" || !block.id || !block.name) continue;
+
+    const toolCallId = String(block.id);
+    toolCallIds.add(toolCallId);
+    const pendingTool: ToolExecutionEvent = {
+      toolCallId,
+      toolName: String(block.name),
+      args: (block.input ?? block.arguments ?? undefined) as JsonValue | undefined,
+      timestamp: message.timestamp,
+      status: "pending"
+    };
+    entries.push({
+      kind: "tool",
+      key: `tool-${toolCallId}`,
+      event: { ...pendingTool, ...toolMap.get(toolCallId) }
+    });
+  }
+
+  for (const tool of toolEvents) {
+    if (toolCallIds.has(tool.toolCallId)) continue;
+    entries.push({ kind: "tool", event: tool, key: `tool-live-${tool.toolCallId}` });
+  }
+
+  return {
+    id: message.id || String(message.timestamp || "streaming"),
+    entries,
+    active: true
+  };
+}
+
+function traceShapeKey(blocks: ContentBlock[]): string {
+  return blocks
+    .map((block, index) => {
+      if (block.type === "thinking") return `thinking:${index}:${block.thinking?.length ?? 0}`;
+      if (block.type === "toolCall") return `tool:${block.id || index}:${block.name || ""}`;
+      return "";
+    })
+    .filter(Boolean)
+    .join("|");
+}
+
+function hasAssistantDisplayContent(message: AgentMessage): boolean {
+  if (message.errorMessage) return true;
+  return extractContentBlocks(message).some((block) =>
+    block.type === "text" && Boolean(block.text?.trim()) ||
+    block.type === "image" ||
+    !["thinking", "toolCall"].includes(block.type)
+  );
+}
+
 function renderTimelineItem(item: TimelineItem, index: number, prefix = "history"): React.ReactNode {
   if (item.kind === "message") {
     return <MessageBubble key={`${prefix}-${messageKey(item.message, index)}`} message={item.message} />;
+  }
+  if (item.kind === "trace") {
+    return <TraceBubble key={`${prefix}-trace-${item.trace.id || index}`} trace={item.trace} />;
   }
   if (item.kind === "toolEvent") {
     return <ToolExecutionBubble key={`${prefix}-tool-${item.event.toolCallId || index}`} tool={item.event} />;

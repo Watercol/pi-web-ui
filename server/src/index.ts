@@ -1,14 +1,29 @@
 import { createApp } from "./http.js";
 import { checkPiBinary, parseArgs } from "./config.js";
 import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
 
 try {
   const config = parseArgs(process.argv.slice(2));
   checkPiBinary(config.piBin);
   const app: Server = createApp(config);
 
+  app.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EADDRINUSE") {
+      const address = typeof error.address === "string" ? error.address : config.host;
+      const port = typeof error.port === "number" ? error.port : config.port;
+      console.error(`Port already in use: ${address}:${port}`);
+      console.error(`Stop the existing pi-web-ui process, or run on another port: npm run dev -- --port ${port + 1}`);
+    } else {
+      console.error(error.message);
+    }
+    app.close(() => process.exit(1));
+  });
+
   app.listen(config.port, config.host, () => {
-    const address = `http://${config.host}:${config.port}`;
+    const serverAddress = app.address() as AddressInfo | null;
+    const port = serverAddress?.port ?? config.port;
+    const address = `http://${config.host}:${port}`;
     console.log(`Pi Web UI listening on ${address}`);
     console.log(`Pi RPC cwd: ${config.cwd}`);
     console.log(`Pi binary: ${config.piBin}`);
