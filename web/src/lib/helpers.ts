@@ -90,8 +90,7 @@ export type TimelineItem =
   | { kind: "message"; message: AgentMessage }
   | { kind: "trace"; trace: ExecutionTrace }
   | { kind: "toolEvent"; event: ToolExecutionEvent }
-  | { kind: "toolGroup"; events: { kind: "toolEvent"; event: ToolExecutionEvent }[] }
-  | { kind: "activity"; event: ActivityEvent };
+  | { kind: "toolGroup"; events: { kind: "toolEvent"; event: ToolExecutionEvent }[] };
 
 export function formatArgSummary(args: JsonValue | undefined): string {
   if (!args || typeof args !== "object" || Array.isArray(args)) return "";

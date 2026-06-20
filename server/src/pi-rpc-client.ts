@@ -100,6 +100,13 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
   private readonly streamingUsageMessages = new Map<string, AgentMessage>();
   private lastError: string | undefined;
 
+  // Coalesce rapid message_update events to reduce SSE traffic.
+  // During LLM streaming, Pi may emit 60+ message_update per second;
+  // buffering and flushing every 200ms cuts SSE events by ~92% (~5/s).
+  private pendingMessageUpdate: StreamingMessage | null = null;
+  private messageUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly MESSAGE_UPDATE_COALESCE_MS = 200;
+
   constructor(private readonly config: ServerConfig) {
     super();
   }
@@ -130,6 +137,7 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
     });
     child.on("exit", (code, signal) => {
       const reason = `Pi RPC process exited${code === null ? "" : ` with code ${code}`}${signal ? ` (${signal})` : ""}`;
+      this.clearMessageUpdateTimer();
       this.child = undefined;
       this.setError(reason);
       this.rejectAll(new Error(reason));
@@ -143,6 +151,7 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
 
   stop(): void {
     if (!this.child) return;
+    this.clearMessageUpdateTimer();
     this.child.kill();
   }
 
@@ -338,10 +347,12 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
 
   private applyEvent(event: PiRpcEvent): void {
     if (event.type === "agent_start") {
+      this.flushMessageUpdate();
       this.lastStateData = { ...this.lastStateData, isStreaming: true };
       this.emitState();
       this.emit("agentStart");
     } else if (event.type === "agent_end") {
+      this.flushMessageUpdate();
       this.lastStateData = { ...this.lastStateData, isStreaming: false };
       const messages = (event as { messages?: AgentMessage[] }).messages;
       const willRetry = Boolean(event.willRetry);
@@ -354,23 +365,28 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
       }
       this.refreshStats().then(() => this.emitState()).catch(() => this.emitState());
       this.emit("agentEnd", messages, willRetry);
-    } else if (event.type === "message_start") {
-      const msg = this.normalizeStreamingMessage(event.message);
-      if (msg) {
-        this.applyUsageMessage(msg);
-        this.emit("messageStart", msg);
-      }
     } else if (event.type === "message_update" || event.type === "message_partial") {
       const msg = this.normalizeStreamingMessage((event as { message?: unknown }).message);
       if (msg) {
         this.applyUsageMessage(msg);
-        this.emit("messageUpdate", msg);
+        this.pendingMessageUpdate = msg;
+        if (!this.messageUpdateTimer) {
+          this.messageUpdateTimer = setTimeout(() => this.flushMessageUpdate(), PiRpcClient.MESSAGE_UPDATE_COALESCE_MS);
+        }
       }
     } else if (event.type === "message_end") {
+      this.flushMessageUpdate();
       const msg = this.normalizeStreamingMessage((event as { message?: unknown }).message);
       if (msg) {
         this.applyUsageMessage(msg);
         this.emit("messageEnd", msg);
+      }
+    } else if (event.type === "message_start") {
+      this.flushMessageUpdate();
+      const msg = this.normalizeStreamingMessage(event.message);
+      if (msg) {
+        this.applyUsageMessage(msg);
+        this.emit("messageStart", msg);
       }
     } else if (event.type === "tool_execution_start") {
       this.emit("toolStart", {
@@ -632,6 +648,27 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
       }
       return { type: String(block.type ?? "text"), ...block } as ContentBlock;
     });
+  }
+
+  /** Flush the most recent buffered message_update, if any. */
+  private flushMessageUpdate(): void {
+    if (this.messageUpdateTimer) {
+      clearTimeout(this.messageUpdateTimer);
+      this.messageUpdateTimer = null;
+    }
+    if (this.pendingMessageUpdate) {
+      this.emit("messageUpdate", this.pendingMessageUpdate);
+      this.pendingMessageUpdate = null;
+    }
+  }
+
+  /** Clear the message update timer without emitting. */
+  private clearMessageUpdateTimer(): void {
+    if (this.messageUpdateTimer) {
+      clearTimeout(this.messageUpdateTimer);
+      this.messageUpdateTimer = null;
+    }
+    this.pendingMessageUpdate = null;
   }
 
   private applyActivityEvent(event: PiRpcEvent): void {

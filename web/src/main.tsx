@@ -1,17 +1,17 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useDeferredValue } from "react";
 import { createRoot } from "react-dom/client";
-import { CircleStop, RefreshCcw, SendHorizontal, Terminal, Wrench, Monitor, FileCode, AlertTriangle, Loader2, ChevronDown, ChevronRight, Info, RotateCcw, Bell, Check, Plus } from "lucide-react";
-import type { ActivityEvent, AgentMessage, JsonValue, PiModel, PiRpcEvent, PiSessionInfo, PiState, ServerEvent, SessionStats, StreamingMessage, ToolExecutionEvent, ContentBlock, QueueState } from "../../shared/src/index.js";
+import { CircleStop, RefreshCcw, SendHorizontal, Terminal, Wrench, Monitor, FileCode, AlertTriangle, Loader2, ChevronDown, ChevronRight, Check, Plus } from "lucide-react";
+import type { ActivityEvent, AgentMessage, JsonValue, PiModel, PiSessionInfo, PiState, ServerEvent, SessionStats, StreamingMessage, ToolExecutionEvent, ContentBlock, QueueState } from "../../shared/src/index.js";
 import { marked } from "marked";
 import "./styles.css";
-import { MAX_VISIBLE_MESSAGES, emptyState, resizeComposerTextarea, modelDisplayName, modelKey, thinkingLevelLabel, supportedThinkingLevels, sessionDisplayName, formatRelativeTime, formatArgSummary, extractText, extractContentBlocks, buildStreamingTrace, traceShapeKey, hasAssistantDisplayContent, collapseToolGroups, mergeMessages, messageKey, shouldDisplayActivity, summarizeContentBlocks, appendToolEvent, isUnknownDisplayEvent, formatMs, stripAnsiDisplay, formatTokens, traceEntryStatusColor, traceOverallStatus } from "./lib/helpers.js";
+import { MAX_VISIBLE_MESSAGES, emptyState, resizeComposerTextarea, modelDisplayName, modelKey, thinkingLevelLabel, supportedThinkingLevels, sessionDisplayName, formatRelativeTime, formatArgSummary, extractText, extractContentBlocks, buildStreamingTrace, traceShapeKey, hasAssistantDisplayContent, collapseToolGroups, mergeMessages, messageKey, shouldDisplayActivity, summarizeContentBlocks, appendToolEvent, isUnknownDisplayEvent, stripAnsiDisplay, formatTokens, traceEntryStatusColor, traceOverallStatus } from "./lib/helpers.js";
+import { ToastProvider, useToast } from "./lib/toast.js";
 
 type TimelineItem =
   | { kind: "message"; message: AgentMessage }
   | { kind: "trace"; trace: ExecutionTrace }
   | { kind: "toolEvent"; event: ToolExecutionEvent }
-  | { kind: "toolGroup"; events: { kind: "toolEvent"; event: ToolExecutionEvent }[] }
-  | { kind: "activity"; event: ActivityEvent };
+  | { kind: "toolGroup"; events: { kind: "toolEvent"; event: ToolExecutionEvent }[] };
 
 type ExecutionTrace = {
   id: string;
@@ -80,11 +80,13 @@ function App() {
 
   // --- streaming state ---
   const [streamingMessage, setStreamingMessage] = useState<StreamingMessage | undefined>();
+  // Defer streaming text rendering so rapid updates don't block scrolling / tool updates.
+  // React 18 will skip intermediate renders when new updates arrive before paint.
+  const deferredStreamingMessage = useDeferredValue(streamingMessage);
   const [toolEvents, setToolEvents] = useState<ToolExecutionEvent[]>([]);
   const [queueState, setQueueState] = useState<QueueState>({ steering: [], followUp: [] });
   const [isCompacting, setIsCompacting] = useState(false);
-  const [compactionMessage, setCompactionMessage] = useState<string | undefined>();
-  const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
+
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatus[]>([]);
   const [models, setModels] = useState<PiModel[]>([]);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -98,6 +100,8 @@ function App() {
   const [creatingSession, setCreatingSession] = useState(false);
   const [thinkingMenuOpen, setThinkingMenuOpen] = useState(false);
   const [switchingThinkingLevel, setSwitchingThinkingLevel] = useState<string | undefined>();
+
+  const { pushToast } = useToast();
 
   const updateExtensionStatus = (event: Extract<ActivityEvent, { type: "extension_ui_request" }>) => {
     const rawText = event.statusText || event.message || event.text || event.title || event.statusKey || "Extension UI update";
@@ -123,39 +127,20 @@ function App() {
     });
   };
 
+  // Route an activity event to either extension status bar or toast stack
   const pushActivity = (event: ActivityEvent) => {
     if (event.type === "extension_ui_request" && event.method === "setStatus") {
       updateExtensionStatus(event);
       return;
     }
-
-    // Auto-dismiss successful retry end notices after 5 seconds
-    if (event.type === "auto_retry_end" && event.success) {
-      setTimeout(() => {
-        setActivityEvents((prev) => prev.filter((a) => a.id !== event.id));
-      }, 5000);
-    }
-
-    setActivityEvents((prev) => {
-      // Clean "retry pending" cards (agent_end willRetry) when actual retry flow starts
-      let filtered = prev;
-      if (event.type === "auto_retry_start") {
-        filtered = prev.filter(
-          (a) => !(a.type === "unknown" && "willRetry" in (a.event || {}) && (a.event as Record<string, unknown>).willRetry)
-        );
-      }
-      // Replace matching retry start with its end event to keep a single card
-      if (event.type === "auto_retry_end") {
-        const idx = filtered.findIndex(
-          (a) => a.type === "auto_retry_start" && a.attempt === event.attempt
-        );
-        if (idx >= 0) {
-          const updated = [...filtered];
-          updated[idx] = event;
-          return updated;
-        }
-      }
-      return [...filtered, event].slice(-40);
+    // All other activity events go to the toast stack
+    const dismissGroups: string[] | undefined =
+      event.type === "auto_retry_start" ? ["retry-pending"] : undefined;
+    pushToast({
+      id: event.id,
+      type: event.type,
+      payload: event,
+      dismissGroups
     });
   };
 
@@ -179,7 +164,7 @@ function App() {
         case "state":
           setState(event.state);
           isStreamingRef.current = event.state.isStreaming;
-          setDisplayStats((current) => event.state.isStreaming && current ? current : event.state.stats);
+          setDisplayStats((current) => event.state.stats ?? current);
           break;
         case "messages":
           setMessages(mergeMessages([], event.messages));
@@ -192,11 +177,10 @@ function App() {
           break;
         case "pi_event":
           if (isUnknownDisplayEvent(event.event)) {
-            pushActivity({
+            pushToast({
               id: `unknown-${Date.now()}-${Math.random().toString(36).slice(2)}`,
               type: "unknown",
-              timestamp: Date.now(),
-              event: event.event
+              payload: { type: "unknown", timestamp: Date.now(), event: event.event } as ActivityEvent
             });
           }
           break;
@@ -213,17 +197,15 @@ function App() {
           lastTraceShapeRef.current = "";
           lastTextContentRef.current = "";
           setIsCompacting(false);
-          setCompactionMessage(undefined);
           break;
         case "agent_end":
           isStreamingRef.current = false;
           setStreamingMessage(undefined);
           if (event.willRetry) {
-            pushActivity({
+            pushToast({
               id: `retry-pending-${Date.now()}`,
-              type: "unknown",
-              timestamp: Date.now(),
-              event: { type: "agent_end", willRetry: true }
+              type: "agent_retry_pending",
+              payload: { id: `retry-pending-${Date.now()}`, type: "agent_retry_pending", timestamp: Date.now() } as unknown as ActivityEvent
             });
           }
           break;
@@ -318,11 +300,16 @@ function App() {
 
         case "compaction_start":
           setIsCompacting(true);
-          setCompactionMessage(event.reason ? `Compacting (${event.reason})...` : "Compacting context...");
           break;
         case "compaction_end":
           setIsCompacting(false);
-          setCompactionMessage(event.aborted ? "Compaction cancelled" : event.errorMessage ? `Compaction failed: ${event.errorMessage}` : event.summary ? "Context compacted" : undefined);
+          if (event.errorMessage || event.aborted) {
+            pushToast({
+              id: `compaction-${Date.now()}`,
+              type: "compaction_end",
+              payload: { id: `compaction-${Date.now()}`, type: "compaction_end", timestamp: Date.now(), errorMessage: event.errorMessage, aborted: event.aborted } as unknown as ActivityEvent
+            });
+          }
           break;
 
         case "queue_update":
@@ -384,7 +371,7 @@ function App() {
   useEffect(() => {
     if (!shouldStickToBottomRef.current) return;
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
-  }, [messages, streamingMessage, toolEvents, activityEvents, isCompacting]);
+  }, [messages, streamingMessage, toolEvents, isCompacting]);
 
   // Merge all event streams into a single chronological timeline
   // Cap messages to avoid performance degradation on long sessions
@@ -485,23 +472,19 @@ function App() {
       if (consumedActiveTools.has(tool.toolCallId)) continue;
       liveItems.push({ kind: "toolEvent", event: tool });
     }
-    for (const event of activityEvents) {
-      liveItems.push({ kind: "activity", event });
-    }
-
     return {
       items: collapseToolGroups(items),
       liveItems: collapseToolGroups(liveItems),
       truncated: totalMessages > MAX_VISIBLE_MESSAGES
     };
-  }, [messages, toolEvents, activityEvents]);
+  }, [messages, toolEvents]);
 
   async function fetchState() {
     const response = await fetch("/api/state");
     const nextState = (await response.json()) as PiState;
     isStreamingRef.current = nextState.isStreaming;
     setState(nextState);
-    setDisplayStats((current) => nextState.isStreaming && current ? current : nextState.stats);
+    setDisplayStats((current) => nextState.stats ?? current);
   }
 
   async function fetchMessages() {
@@ -637,10 +620,8 @@ function App() {
         setSessionMenuOpen(false);
         setStreamingMessage(undefined);
         setToolEvents([]);
-        setActivityEvents([]);
         setDisplayStats(undefined);
         setIsCompacting(false);
-        setCompactionMessage(undefined);
         setQueueState({ steering: [], followUp: [] });
         await Promise.all([fetchState(), fetchMessages()]);
         void fetchSessions();
@@ -666,10 +647,8 @@ function App() {
         setSessionMenuOpen(false);
         setStreamingMessage(undefined);
         setToolEvents([]);
-        setActivityEvents([]);
         setDisplayStats(undefined);
         setIsCompacting(false);
-        setCompactionMessage(undefined);
         setQueueState({ steering: [], followUp: [] });
         await Promise.all([fetchState(), fetchMessages()]);
         void fetchSessions();
@@ -775,7 +754,7 @@ function App() {
             onToggle={() => setThinkingMenuOpen((open) => !open)}
             onSelect={(level) => void switchThinkingLevel(level)}
           />
-          <Status label="Stream" value={state.isStreaming ? "streaming" : "idle"} tone={state.isStreaming ? "hot" : "ok"} />
+          <Status label="Stream" value={isCompacting ? "compacting" : state.isStreaming ? "streaming" : "idle"} tone={isCompacting ? "warn" : state.isStreaming ? "hot" : "ok"} />
         </div>
       </header>
 
@@ -801,7 +780,6 @@ function App() {
           <div className="empty-state">Start a Pi RPC chat in {state.cwd || "this workspace"}.</div>
         ) : (
           <>
-            <div className="path-line" />
             {timeline.truncated && (
               <div className="truncation-notice">
                 Showing last {MAX_VISIBLE_MESSAGES} of {messages.length} messages.
@@ -813,20 +791,12 @@ function App() {
             {streamingMessage && (
               <StreamingAssistantCard
                 trace={buildStreamingTrace(streamingMessage, toolEvents)}
-                message={streamingMessage}
+                message={deferredStreamingMessage || streamingMessage}
               />
             )}
 
             {timeline.liveItems
-              .filter((item) => !streamingMessage || item.kind === "activity")
               .map((item, i) => renderTimelineItem(item, i, "live"))}
-
-            {isCompacting && (
-              <div className="compaction-notice">
-                <Loader2 size={14} className="spinner" />
-                <span>{compactionMessage || "Compacting context..."}</span>
-              </div>
-            )}
           </>
         )}
       </section>
@@ -869,7 +839,7 @@ function App() {
 // ============================================================================
 // Status badge
 // ============================================================================
-function Status({ label, value, tone }: { label: string; value: string; tone?: "ok" | "bad" | "hot" }) {
+function Status({ label, value, tone }: { label: string; value: string; tone?: "ok" | "bad" | "hot" | "warn" }) {
   return (
     <div className={`status ${tone || ""}`}>
       <span>{label}</span>
@@ -1212,7 +1182,7 @@ function AssistantBubble({ message }: { message: AgentMessage }) {
 // Path diagram — Layer 1 wrapper (session-level node)
 // ============================================================================
 
-type PathDotTone = "user" | "assistant" | "active" | "complete" | "error" | "ok" | "cancelled" | "activity";
+type PathDotTone = "user" | "assistant" | "active" | "complete" | "error" | "ok" | "cancelled";
 
 function PathNode({ dotTone, dotKind, children }: { dotTone?: PathDotTone; dotKind?: string; children: React.ReactNode }) {
   const kind = dotKind || "";
@@ -1612,82 +1582,6 @@ function ArgValue({ value }: { value: unknown }) {
   return <span className="arg-raw">{JSON.stringify(value)}</span>;
 }
 
-function ActivityBubble({ event }: { event: ActivityEvent }) {
-  const time = new Date(event.timestamp).toLocaleTimeString();
-  const meta = `${time}`;
-
-  if (event.type === "thinking_level_changed") {
-    return <NoticeBubble icon={<Info size={12} />} label="Thinking" text={`Thinking level set to ${event.level || "default"}`} meta={meta} />;
-  }
-  if (event.type === "session_info_changed") {
-    return <NoticeBubble icon={<Info size={12} />} label="Session" text={event.name ? `Session renamed to ${event.name}` : "Session name cleared"} meta={meta} />;
-  }
-  if (event.type === "auto_retry_start") {
-    return <NoticeBubble icon={<RotateCcw size={12} className="spinner-slow" />} label="Retry" text={`Retry ${event.attempt}/${event.maxAttempts} in ${formatMs(event.delayMs)}: ${event.errorMessage}`} meta={meta} tone="warn" />;
-  }
-  if (event.type === "auto_retry_end") {
-    return <NoticeBubble icon={<RotateCcw size={12} />} label="Retry" text={event.success ? `Retry ${event.attempt} succeeded` : `Retry ${event.attempt} failed${event.finalError ? `: ${event.finalError}` : ""}`} meta={meta} tone={event.success ? "ok" : "error"} />;
-  }
-  if (event.type === "extension_ui_request") {
-    return <ExtensionUiBubble event={event} meta={meta} />;
-  }
-  if (event.type === "extension_error") {
-    return <NoticeBubble icon={<AlertTriangle size={12} />} label="Extension" text={`${event.extensionPath || "Extension"} failed${event.event ? ` during ${event.event}` : ""}: ${event.error || "Unknown error"}`} meta={meta} tone="error" />;
-  }
-  if (event.type === "unknown") return <RawEventBubble event={event.event} meta={meta} />;
-  return <RawEventBubble event={{ type: event.type } as PiRpcEvent} meta={meta} />;
-}
-
-function NoticeBubble({ icon, label, text, meta, tone }: { icon: React.ReactNode; label: string; text: string; meta: string; tone?: "ok" | "warn" | "error" }) {
-  return (
-    <article className={`message activity ${tone || ""}`}>
-      <div className="message-role">
-        {icon}
-        {label}
-        <span className="activity-time">{meta}</span>
-      </div>
-      <div className="message-body">{text}</div>
-    </article>
-  );
-}
-
-function ExtensionUiBubble({ event, meta }: { event: Extract<ActivityEvent, { type: "extension_ui_request" }>; meta: string }) {
-  const label = event.method === "notify" ? "Notification" : `Extension UI: ${event.method}`;
-  const rawText = event.message || event.title || event.statusText || event.text || event.widgetLines?.join("\n") || event.statusKey || event.widgetKey || "Extension UI update";
-  const text = stripAnsiDisplay(rawText);
-  const tone = event.notifyType === "error" ? "error" : event.notifyType === "warning" ? "warn" : undefined;
-  return (
-    <article className={`message activity extension ${tone || ""}`}>
-      <div className="message-role">
-        <Bell size={12} />
-        {label}
-        <span className="activity-time">{meta}</span>
-      </div>
-      <div className="message-body">
-        <div>{text}</div>
-        {event.options && event.options.length > 0 && (
-          <div className="option-list">
-            {event.options.map((option) => <span key={option}>{option}</span>)}
-          </div>
-        )}
-      </div>
-    </article>
-  );
-}
-
-function RawEventBubble({ event, meta }: { event: PiRpcEvent; meta: string }) {
-  return (
-    <details className="message activity raw">
-      <summary className="message-role">
-        <Info size={12} />
-        {event.type || "Pi event"}
-        <span className="activity-time">{meta}</span>
-      </summary>
-      <pre>{JSON.stringify(event, null, 2)}</pre>
-    </details>
-  );
-}
-
 // ============================================================================
 // Bash execution bubble
 // ============================================================================
@@ -1850,11 +1744,8 @@ function renderTimelineItem(item: TimelineItem, index: number, prefix = "history
       </PathNode>
     );
   }
-  return (
-    <PathNode key={`${prefix}-activity-${item.event.id}`} dotKind="activity" dotTone="activity">
-      <ActivityBubble event={item.event} />
-    </PathNode>
-  );
+  // Unknown timeline item kind — render nothing
+  return null;
 }
 
 /** Status progression: pending → running → complete. Never regress. */
@@ -1923,7 +1814,9 @@ const rootEl = typeof document !== "undefined" ? document.getElementById("root")
 if (rootEl) {
   createRoot(rootEl).render(
     <React.StrictMode>
-      <App />
+      <ToastProvider>
+        <App />
+      </ToastProvider>
     </React.StrictMode>
   );
 }
