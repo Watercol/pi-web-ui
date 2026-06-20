@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — 2026-06-20
+
+### Added
+- README 添加 Pi Web UI 截图展示
+- README 添加 CHANGELOG 链接
+- CHANGELOG.md 纳入发布的 npm 包中
+
 ## 0.2.0 — 2026-06-20
 
 ### Added
