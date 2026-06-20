@@ -4,8 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ModelSwitchRequest, PromptRequest, ServerEvent, SessionSwitchRequest, ThinkingLevelSwitchRequest } from "../../shared/src/index.js";
 import type { ServerConfig } from "./config.js";
-import type { PiRpcClient } from "./pi-rpc-client.js";
-import { PiRpcClient as PiRpcClientClass } from "./pi-rpc-client.js";
+import { PiRpcClient as PiRpcClientClass, type PiRpcClient } from "./pi-rpc-client.js";
 import { listSessions } from "./sessions.js";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");

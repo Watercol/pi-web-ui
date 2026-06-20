@@ -2,8 +2,12 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    include: ["server/test/**/*.test.ts", "web/test/**/*.test.{ts,tsx}"],
+    restoreMocks: true,
     environment: "node",
-    include: ["server/test/**/*.test.ts"],
-    restoreMocks: true
+    environmentMatchGlobs: [
+      ["web/test/**", "jsdom"]
+    ],
+    setupFiles: ["web/test/setup.ts"]
   }
 });

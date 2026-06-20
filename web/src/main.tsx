@@ -4,66 +4,7 @@ import { CircleStop, RefreshCcw, SendHorizontal, Terminal, Wrench, Monitor, File
 import type { ActivityEvent, AgentMessage, JsonValue, PiModel, PiRpcEvent, PiSessionInfo, PiState, ServerEvent, SessionStats, StreamingMessage, ToolExecutionEvent, ContentBlock, QueueState } from "../../shared/src/index.js";
 import { marked } from "marked";
 import "./styles.css";
-
-const COMPOSER_MAX_VIEWPORT_RATIO = 0.5;
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
-type ThinkingLevel = typeof THINKING_LEVELS[number];
-
-function resizeComposerTextarea(el: HTMLTextAreaElement) {
-  el.style.height = "auto";
-  const maxHeight = Math.max(46, window.innerHeight * COMPOSER_MAX_VIEWPORT_RATIO);
-  const nextHeight = Math.min(el.scrollHeight, maxHeight);
-  el.style.height = `${nextHeight}px`;
-  el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
-}
-
-function modelDisplayName(model: PiModel): string {
-  return model.displayName || model.name || model.id || `${model.provider || "model"}`;
-}
-
-function modelKey(model: PiModel): string {
-  const provider = typeof model.provider === "string" ? model.provider : "";
-  const id = typeof model.id === "string" ? model.id : typeof model.name === "string" ? model.name : "";
-  return `${provider}/${id}`;
-}
-
-function thinkingLevelLabel(level: string): string {
-  return level === "xhigh" ? "X High" : level.charAt(0).toUpperCase() + level.slice(1);
-}
-
-function supportedThinkingLevels(model: PiModel | null): ThinkingLevel[] {
-  if (!model) return ["off", "minimal", "low", "medium", "high"];
-  if (model.reasoning === false) return ["off"];
-
-  const map = model.thinkingLevelMap && typeof model.thinkingLevelMap === "object" && !Array.isArray(model.thinkingLevelMap)
-    ? model.thinkingLevelMap as Record<string, JsonValue | undefined>
-    : undefined;
-
-  return THINKING_LEVELS.filter((level) => {
-    const mapped = map?.[level];
-    if (mapped === null) return false;
-    if (level === "xhigh") return mapped !== undefined;
-    return true;
-  });
-}
-
-function sessionDisplayName(session: PiSessionInfo): string {
-  return session.name || session.firstMessage || session.id || "New session";
-}
-
-function formatRelativeTime(value: string): string {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return "";
-  const diffMs = Date.now() - timestamp;
-  const mins = Math.floor(diffMs / 60000);
-  const hours = Math.floor(diffMs / 3600000);
-  const days = Math.floor(diffMs / 86400000);
-  if (mins < 1) return "now";
-  if (mins < 60) return `${mins}m`;
-  if (hours < 24) return `${hours}h`;
-  if (days < 7) return `${days}d`;
-  return new Date(timestamp).toLocaleDateString();
-}
+import { MAX_VISIBLE_MESSAGES, emptyState, resizeComposerTextarea, modelDisplayName, modelKey, thinkingLevelLabel, supportedThinkingLevels, sessionDisplayName, formatRelativeTime, formatArgSummary, extractText, extractContentBlocks, buildStreamingTrace, traceShapeKey, hasAssistantDisplayContent, collapseToolGroups, mergeMessages, messageKey, shouldDisplayActivity, summarizeContentBlocks, appendToolEvent, isUnknownDisplayEvent, formatMs, stripAnsiDisplay, formatTokens, traceEntryStatusColor, traceOverallStatus } from "./lib/helpers.js";
 
 type TimelineItem =
   | { kind: "message"; message: AgentMessage }
@@ -90,15 +31,8 @@ type ExtensionStatus = {
 };
 
 // ============================================================================
-// State helpers
+// Constants
 // ============================================================================
-const emptyState: PiState = {
-  cwd: "",
-  piBin: "",
-  model: null,
-  isStreaming: false,
-  processRunning: false
-};
 
 // ============================================================================
 // Markdown renderer
@@ -106,7 +40,19 @@ const emptyState: PiState = {
 marked.setOptions({ gfm: true, breaks: false });
 
 function Markdown({ text }: { text: string }) {
-  const html = useMemo(() => marked.parse(text, { async: false }) as string, [text]);
+  const lastTextRef = useRef("");
+  const lastHtmlRef = useRef("");
+
+  // Re-parse only when text content actually changes.
+  // During streaming, React may re-render with the same text prop value
+  // from unrelated state changes; the ref cache avoids redundant O(n) parse.
+  const html = useMemo(() => {
+    if (text === lastTextRef.current) return lastHtmlRef.current;
+    lastTextRef.current = text;
+    lastHtmlRef.current = marked.parse(text, { async: false }) as string;
+    return lastHtmlRef.current;
+  }, [text]);
+
   return <div className="markdown-body" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
@@ -127,11 +73,10 @@ function App() {
   const composingRef = useRef(false);
   const lastStreamUpdateRef = useRef(0);
   const lastTraceShapeRef = useRef("");
+  const lastTextContentRef = useRef("");
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const sessionMenuRef = useRef<HTMLDivElement>(null);
   const thinkingMenuRef = useRef<HTMLDivElement>(null);
-
-  const MAX_VISIBLE_MESSAGES = 1000;
 
   // --- streaming state ---
   const [streamingMessage, setStreamingMessage] = useState<StreamingMessage | undefined>();
@@ -264,7 +209,9 @@ function App() {
           isStreamingRef.current = true;
           setStreamingMessage(undefined);
           setToolEvents([]);
+          setQueueState({ steering: [], followUp: [] });
           lastTraceShapeRef.current = "";
+          lastTextContentRef.current = "";
           setIsCompacting(false);
           setCompactionMessage(undefined);
           break;
@@ -285,17 +232,50 @@ function App() {
           // Skip toolResult messages — they're already shown via ToolExecutionBubble
           if (event.message.role === "toolResult") break;
           lastTraceShapeRef.current = traceShapeKey(event.message.content);
+          // Register tool calls from the initial message content block
+          for (const block of event.message.content) {
+            if (block.type === "toolCall" && block.id) {
+              setToolEvents((prev) => appendToolEvent(prev, {
+                toolCallId: String(block.id),
+                toolName: String(block.name || "unknown"),
+                args: (block.arguments ?? block.input ?? undefined) as JsonValue | undefined,
+                timestamp: Date.now(),
+                status: "pending"
+              }));
+            }
+          }
           setStreamingMessage(event.message);
           break;
         case "message_update":
-          // Throttle streaming text updates to ~30fps to avoid excessive re-renders.
-          // Trace shape changes are still processed immediately so thinking/tool order stays stable.
+          // Throttle streaming text updates adaptively to avoid excessive re-renders.
+          // For long texts (>10KB), update less frequently to prevent event backlog.
+          // Trace shape changes (thinking/tool blocks) are still processed immediately.
           {
             const now = Date.now();
-            const needsThrottle = now - lastStreamUpdateRef.current < 32;
-            const traceShape = traceShapeKey(event.message.content);
-            const traceShapeChanged = traceShape !== lastTraceShapeRef.current;
-            // Always process tool calls regardless of throttle
+
+            // Fast path: check if the text content actually changed since last update.
+            // When only trace shape changes (thinking/tool), text stays same.
+            const textContent = event.message.content
+              .filter((b) => b.type === "text")
+              .map((b) => b.text || "")
+              .join("");
+            const textChanged = textContent !== lastTextContentRef.current;
+
+            // Adaptive throttle: longer texts get longer intervals so markdown
+            // parsing (O(n)) doesn't starve the main thread and cause event backlog.
+            const textLen = textContent.length;
+            const throttleMs = textLen > 20000 ? 150 : textLen > 8000 ? 80 : textLen > 3000 ? 50 : 32;
+            const needsThrottle = now - lastStreamUpdateRef.current < throttleMs;
+
+            // Compute trace shape only when we might need it
+            let traceShapeChanged = false;
+            if (!needsThrottle || textChanged) {
+              const traceShape = traceShapeKey(event.message.content);
+              traceShapeChanged = traceShape !== lastTraceShapeRef.current;
+              if (traceShapeChanged) lastTraceShapeRef.current = traceShape;
+            }
+
+            // Always process tool calls regardless of throttle (they must not be missed)
             for (const block of event.message.content) {
               if (block.type === "toolCall" && block.id) {
                 setToolEvents((prev) => appendToolEvent(prev, {
@@ -307,17 +287,20 @@ function App() {
                 }));
               }
             }
-            if (!needsThrottle || traceShapeChanged) {
+
+            // Only update streaming message when text changed OR trace shape changed.
+            if (textChanged || traceShapeChanged) {
+              if (textChanged) lastTextContentRef.current = textContent;
               lastStreamUpdateRef.current = now;
-              lastTraceShapeRef.current = traceShape;
               setStreamingMessage(event.message);
             }
           }
           break;
         case "message_end":
-          // Only persist assistant/system messages; user is added by sendPrompt(),
-          // toolResult is shown via ToolExecutionBubble
-          if (event.message.role === "assistant" || event.message.role === "compactionSummary" || event.message.role === "branchSummary" || event.message.role === "custom" || event.message.role === "bashExecution") {
+          // Persist assistant, system, and toolResult messages.
+          // User messages are added locally by sendPrompt(); they arrive later
+          // via the server and are deduplicated by mergeMessages.
+          if (event.message.role === "assistant" || event.message.role === "compactionSummary" || event.message.role === "branchSummary" || event.message.role === "custom" || event.message.role === "bashExecution" || event.message.role === "toolResult") {
             setMessages((prev) => mergeMessages(prev, [event.message as unknown as AgentMessage]));
           }
           setStreamingMessage(undefined);
@@ -413,10 +396,11 @@ function App() {
 
     const items: TimelineItem[] = [];
     const liveItems: TimelineItem[] = [];
-    // Build a lookup of tool results from toolResult messages, keyed by toolCallId then toolName
-    const toolResultMap = new Map<string, ContentBlock[]>();
+    // Build a lookup of tool results from toolResult messages, keyed by toolCallId then toolName.
+    // Results are removed from the map once consumed by a trace, so they are not
+    // re-matched to a later assistant message that called a tool with the same name.
+    const toolResultMap = new Map<string, { content: ContentBlock[]; key: string }>();
     const consumedResults = new Set<string>();
-    const toolCallKeys = new Set<string>();
     const activeToolMap = new Map<string, ToolExecutionEvent>();
     const consumedActiveTools = new Set<string>();
 
@@ -427,23 +411,16 @@ function App() {
     for (const message of visibleMessages) {
       if (message.role === "toolResult") {
         const key = String(message.toolCallId ?? message.toolName ?? "");
-        if (key) toolResultMap.set(key, extractContentBlocks(message));
+        if (key) toolResultMap.set(key, { content: extractContentBlocks(message), key });
         continue;
-      }
-      if (message.role === "assistant") {
-        for (const block of extractContentBlocks(message)) {
-          if (block.type === "toolCall") {
-            if (block.id) toolCallKeys.add(String(block.id));
-            if (block.name) toolCallKeys.add(String(block.name));
-          }
-        }
       }
     }
 
     for (const message of visibleMessages) {
       if (message.role === "toolResult") {
         const key = String(message.toolCallId ?? message.toolName ?? "");
-        if (key && (consumedResults.has(key) || toolCallKeys.has(key))) continue;
+        // Show toolResult as a standalone bubble only when no trace consumed it
+        if (key && consumedResults.has(key)) continue;
         items.push({ kind: "message", message });
         continue;
       }
@@ -461,11 +438,18 @@ function App() {
             const callId = String(block.id);
             const callName = String(block.name);
             const activeTool = activeToolMap.get(callId);
-            const resultContent = toolResultMap.get(callId) ?? toolResultMap.get(callName);
+            // Try toolCallId first, then toolName as fallback.
+            // Remove from map on match so the same result isn't reused by a later assistant.
+            const resultEntry = toolResultMap.get(callId) ?? toolResultMap.get(callName);
+            const resultContent = resultEntry?.content;
 
             if (resultContent && resultContent.length > 0) {
               consumedResults.add(callId);
               consumedResults.add(callName);
+              // Remove consumed result so later assistants with same toolName don't reuse it
+              if (resultEntry) {
+                toolResultMap.delete(resultEntry.key);
+              }
             }
 
             if (activeTool) {
@@ -479,8 +463,11 @@ function App() {
                 toolName: callName,
                 args: (block.input ?? block.arguments ?? undefined) as JsonValue | undefined,
                 timestamp: message.timestamp as number | undefined,
-                status: "complete",
-                ...(resultContent && resultContent.length > 0 && { result: { content: resultContent } })
+                // Only mark as complete when a result is present; otherwise leave
+                // status undefined so the UI does not falsely show a green "done".
+                ...(resultContent && resultContent.length > 0
+                  ? { status: "complete" as const, result: { content: resultContent } }
+                  : {}),
             } });
           }
         }
@@ -652,6 +639,9 @@ function App() {
         setToolEvents([]);
         setActivityEvents([]);
         setDisplayStats(undefined);
+        setIsCompacting(false);
+        setCompactionMessage(undefined);
+        setQueueState({ steering: [], followUp: [] });
         await Promise.all([fetchState(), fetchMessages()]);
         void fetchSessions();
       }
@@ -678,6 +668,9 @@ function App() {
         setToolEvents([]);
         setActivityEvents([]);
         setDisplayStats(undefined);
+        setIsCompacting(false);
+        setCompactionMessage(undefined);
+        setQueueState({ steering: [], followUp: [] });
         await Promise.all([fetchState(), fetchMessages()]);
         void fetchSessions();
       }
@@ -803,11 +796,12 @@ function App() {
         />
       )}
 
-      <section ref={listRef} className="message-list" aria-live="polite" onScroll={handleMessageListScroll}>
+      <section ref={listRef} className="message-list session-path" aria-live="polite" onScroll={handleMessageListScroll}>
         {timeline.items.length === 0 && !streamingMessage ? (
           <div className="empty-state">Start a Pi RPC chat in {state.cwd || "this workspace"}.</div>
         ) : (
           <>
+            <div className="path-line" />
             {timeline.truncated && (
               <div className="truncation-notice">
                 Showing last {MAX_VISIBLE_MESSAGES} of {messages.length} messages.
@@ -816,7 +810,7 @@ function App() {
             )}
             {timeline.items.map((item, i) => renderTimelineItem(item, i))}
 
-            {streamingMessage && streamingMessage.role === "assistant" && (
+            {streamingMessage && (
               <StreamingAssistantCard
                 trace={buildStreamingTrace(streamingMessage, toolEvents)}
                 message={streamingMessage}
@@ -824,7 +818,7 @@ function App() {
             )}
 
             {timeline.liveItems
-              .filter((item) => streamingMessage?.role !== "assistant" || item.kind === "activity")
+              .filter((item) => !streamingMessage || item.kind === "activity")
               .map((item, i) => renderTimelineItem(item, i, "live"))}
 
             {isCompacting && (
@@ -1204,8 +1198,8 @@ function AssistantBubble({ message }: { message: AgentMessage }) {
         ))}
         {imageBlocks.length > 0 && <ResultContent blocks={imageBlocks} />}
         {otherBlocks.length > 0 && <ResultContent blocks={otherBlocks} />}
-        {message.errorMessage && String(message.stopReason) !== "aborted" && (
-          <div className="assistant-error">Error: {String(message.errorMessage)}</div>
+        {message.errorMessage && (
+          <div className="assistant-error">{String(message.errorMessage)}</div>
         )}
       </div>
     </article>
@@ -1215,22 +1209,197 @@ function AssistantBubble({ message }: { message: AgentMessage }) {
 // ============================================================================
 // Streaming trace: merge consecutive completed tools into compact groups
 // ============================================================================
+// Path diagram — Layer 1 wrapper (session-level node)
+// ============================================================================
 
-function CompactToolGroup({ tools, names }: { tools: { event: ToolExecutionEvent; key: string }[]; names: string }) {
-  const [expanded, setExpanded] = useState(false);
+type PathDotTone = "user" | "assistant" | "active" | "complete" | "error" | "ok" | "cancelled" | "activity";
+
+function PathNode({ dotTone, dotKind, children }: { dotTone?: PathDotTone; dotKind?: string; children: React.ReactNode }) {
+  const kind = dotKind || "";
+  return (
+    <div className="path-node">
+      <div className={`path-dot ${kind}${dotTone ? ` ${dotTone}` : ""}`} />
+      <div className="path-card">{children}</div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Trace card (Layer 1 node for a trace — replaces old TraceBubble)
+// ============================================================================
+
+export function TraceCard({ trace, active, defaultExpanded }: { trace: ExecutionTrace; active?: boolean; defaultExpanded?: boolean }) {
+  const [expanded, setExpanded] = useState(defaultExpanded ?? active ?? false);
+  const thinkingCount = trace.entries.filter((e) => e.kind === "thinking").length;
+  const toolCount = trace.entries.filter((e) => e.kind === "tool").length;
+  // Auto-expand when streaming (active) and entries arrive
+  useEffect(() => { if (active) setExpanded(true); }, [active, trace.entries.length]);
+  const hasRunning = active || trace.entries.some((e) => e.kind === "tool" && (e.event.status === "running" || e.event.status === "pending"));
+  const overall = traceOverallStatus(trace.entries, !!active);
+  const toolEntries = trace.entries.filter((e) => e.kind === "tool") as Extract<TraceEntry, { kind: "tool" }>[];
+  const toolNames = toolEntries.map((e) => e.event.toolName).filter(Boolean).join(", ");
+  const parts = [
+    thinkingCount > 0 ? `${thinkingCount} thinking` : "",
+    toolCount > 0 ? `${toolCount} action${toolCount === 1 ? "" : "s"}` : ""
+  ].filter(Boolean);
+
+  if (thinkingCount === 0 && toolCount === 0) return null;
 
   return (
-    <div className="compact-tool-group">
-      <button className="compact-tool-group-toggle" onClick={() => setExpanded(!expanded)}>
-        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        <Wrench size={10} />
-        <span>{tools.length} tool{tools.length !== 1 ? "s" : ""}</span>
-        <span className="compact-tool-group-names">{names}</span>
+    <div className={`trace-card ${overall}`}>
+      <button className="trace-card-header" onClick={() => setExpanded(!expanded)}>
+        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        {hasRunning ? <Loader2 size={12} className="spinner" /> : <Wrench size={12} />}
+        <span>{active ? "Working" : "Trace"}</span>
+        <span className="trace-summary">{parts.join(" · ")}{toolNames ? ` · ${toolNames}` : ""}</span>
+      </button>
+      {expanded && <SubPath entries={trace.entries} />}
+    </div>
+  );
+}
+
+// ============================================================================
+// Sub-path (Layer 2): trace-internal vertical timeline with dashed line
+// ============================================================================
+
+function SubPath({ entries }: { entries: TraceEntry[] }) {
+  // Merge consecutive completed (non-error) tools into groups
+  const merged: Array<TraceEntry | { kind: "subGroup"; entries: Extract<TraceEntry, { kind: "tool" }>[]; key: string }> = [];
+  let group: Extract<TraceEntry, { kind: "tool" }>[] = [];
+
+  for (const entry of entries) {
+    const isCompletedTool = entry.kind === "tool" && !entry.event.isError &&
+      (entry.event.status === "complete" || (!entry.event.status && !!entry.event.result));
+    if (isCompletedTool) {
+      group.push(entry as Extract<TraceEntry, { kind: "tool" }>);
+    } else {
+      if (group.length >= 2) {
+        merged.push({ kind: "subGroup", entries: group, key: group.map((e) => e.key).join("-") });
+      } else if (group.length === 1) {
+        merged.push(group[0]!);
+      }
+      group = [];
+      merged.push(entry);
+    }
+  }
+  if (group.length >= 2) {
+    merged.push({ kind: "subGroup", entries: group, key: group.map((e) => e.key).join("-") });
+  } else if (group.length === 1) {
+    merged.push(group[0]!);
+  }
+
+  if (merged.length === 0) return null;
+
+  return (
+    <div className="sub-path">
+      <div className="sub-path-line" />
+      {merged.map((item) => {
+        if (item.kind === "subGroup") {
+          return <SubGroup key={item.key} entries={item.entries} />;
+        }
+        return <SubNode key={item.key} entry={item as TraceEntry} />;
+      })}
+    </div>
+  );
+}
+
+// ============================================================================
+// Sub-node (Layer 2): individual thinking or tool entry
+// ============================================================================
+
+function SubNode({ entry }: { entry: TraceEntry }) {
+  const [expanded, setExpanded] = useState(() => {
+    if (entry.kind === "tool") {
+      const t = entry.event;
+      return t.status === "running" || t.status === "pending" || !!t.isError;
+    }
+    return false;
+  });
+
+  // Re-expand when tool status changes to running or error
+  useEffect(() => {
+    if (entry.kind === "tool") {
+      const t = entry.event;
+      if (t.status === "running" || t.status === "pending" || t.isError) setExpanded(true);
+    }
+  }, [entry.kind === "tool" ? entry.event.status : null, entry.kind === "tool" ? entry.event.isError : null]);
+
+  const status = traceEntryStatusColor(entry);
+
+  if (entry.kind === "thinking") {
+    const text = entry.block.thinking || "";
+    const preview = text.length > 80 ? `${text.slice(0, 77)}...` : text;
+    return (
+      <div className="sub-node">
+        <div className={`sub-dot ${status}`} />
+        <button className="sub-node-toggle" onClick={() => setExpanded(!expanded)}>
+          <span className="sub-node-icon">
+            {expanded ? <ChevronDown size={12} className="sub-node-chevron open" /> : <ChevronRight size={12} className="sub-node-chevron" />}
+          </span>
+          <span className="sub-node-label">Thinking</span>
+          <span className="sub-node-summary">{preview}</span>
+        </button>
+        {expanded && (
+          <div className="sub-node-detail">
+            <pre>{text}</pre>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Tool entry
+  const tool = entry.event;
+  const toolName = tool.toolName;
+  const argSummary = formatArgSummary(tool.args);
+  const statusLabel = tool.isError ? "error" : tool.status === "running" ? "running..." : tool.status === "pending" ? "preparing" : "";
+
+  return (
+    <div className="sub-node">
+      <div className={`sub-dot ${status}`} />
+      <button className="sub-node-toggle" onClick={() => setExpanded(!expanded)}>
+        <span className="sub-node-icon">
+          {expanded ? <ChevronDown size={12} className="sub-node-chevron open" /> : <ChevronRight size={12} className="sub-node-chevron" />}
+        </span>
+        <span className="sub-node-label">{toolName}</span>
+        {argSummary && <span className="sub-node-summary">{argSummary}</span>}
+        {statusLabel && (
+          <span className={`sub-node-status badge ${tool.isError ? "badge-error" : "badge-pending"}`}>{statusLabel}</span>
+        )}
       </button>
       {expanded && (
-        <div className="compact-tool-group-items">
-          {tools.map((t) => (
-            <ToolExecutionBubble key={t.key} tool={t.event} collapsed />
+        <div className="sub-node-detail">
+          {tool.args && <ToolArgsTable args={tool.args} />}
+          {(tool.result || tool.partialResult) && (
+            <ToolResultDetails blocks={tool.result?.content || tool.partialResult?.content || []} isPartial={tool.status === "running"} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Sub-group (Layer 2): merged completed tools
+// ============================================================================
+
+function SubGroup({ entries }: { entries: Extract<TraceEntry, { kind: "tool" }>[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const names = entries.map((e) => e.event.toolName).filter(Boolean).join(", ");
+
+  return (
+    <div className="sub-node">
+      <div className="sub-dot complete" />
+      <button className="sub-group-toggle" onClick={() => setExpanded(!expanded)}>
+        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <span className="sub-node-label">{entries.length} tools</span>
+        {names && <span className="sub-node-summary">{names}</span>}
+        <span className="sub-node-status badge badge-ok">done</span>
+      </button>
+      {expanded && (
+        <div className="sub-group-items">
+          {entries.map((entry) => (
+            <SubNode key={entry.key} entry={entry} />
           ))}
         </div>
       )}
@@ -1238,148 +1407,50 @@ function CompactToolGroup({ tools, names }: { tools: { event: ToolExecutionEvent
   );
 }
 
-function renderMergedEntries(entries: TraceEntry[]): React.ReactNode[] {
-  const result: React.ReactNode[] = [];
-  const completedTools: { event: ToolExecutionEvent; key: string }[] = [];
-
-  for (const entry of entries) {
-    if (entry.kind === "thinking") {
-      result.push(<pre key={entry.key}>{entry.block.thinking || ""}</pre>);
-      continue;
-    }
-    // Tool entry: running/pending/error stay inline; completed tools go to bottom group
-    const tool = entry.event;
-    const isDone = tool.status === "complete" || (!tool.status && !!tool.result);
-    if (isDone && !tool.isError) {
-      completedTools.push({ event: tool, key: entry.key });
-    } else {
-      result.push(<ToolExecutionBubble key={entry.key} tool={tool} />);
-    }
-  }
-
-  if (completedTools.length > 0) {
-    const names = completedTools.map((t) => t.event.toolName).filter(Boolean).join(", ");
-    const key = completedTools.map((t) => t.key).join("-");
-    result.push(<CompactToolGroup key={key} tools={completedTools} names={names} />);
-  }
-
-  return result;
-}
-
 // ============================================================================
-// Streaming assistant card (trace + text in one card)
+// Streaming assistant card (trace + text in one card for live streaming)
 // ============================================================================
+
 function StreamingAssistantCard({ trace, message }: { trace: ExecutionTrace; message: StreamingMessage }) {
-  const [expanded, setExpanded] = useState(true);
-  const entries = trace.entries;
-  const thinkingCount = entries.filter((e) => e.kind === "thinking").length;
-  const toolCount = entries.filter((e) => e.kind === "tool").length;
-  const toolEntries = entries.filter((e) => e.kind === "tool") as Extract<TraceEntry, { kind: "tool" }>[];
-  const hasRunning = toolEntries.some((e) => e.event.status === "running" || e.event.status === "pending");
+  const thinkingCount = trace.entries.filter((e) => e.kind === "thinking").length;
+  const toolCount = trace.entries.filter((e) => e.kind === "tool").length;
+  const hasTrace = thinkingCount > 0 || toolCount > 0;
 
   const textBlocks = message.content.filter((b) => b.type === "text");
   const imageBlocks = message.content.filter((b) => b.type === "image");
   const otherBlocks = message.content.filter((b) => !["text", "thinking", "toolCall", "image"].includes(b.type));
 
-  const toolNames = toolEntries.map((e) => e.event.toolName).filter(Boolean).join(", ");
-  const parts = [
-    thinkingCount > 0 ? `${thinkingCount} thinking` : "",
-    toolCount > 0 ? `${toolCount} action${toolCount === 1 ? "" : "s"}` : ""
-  ].filter(Boolean);
-  const hasTrace = thinkingCount > 0 || toolCount > 0;
-
   return (
-    <article className={`message assistant streaming${toolCount > 0 ? " has-tools" : ""}`}>
+    <>
       {hasTrace && (
-        <>
-          <button className="trace-toggle" onClick={() => setExpanded(!expanded)}>
-            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-            {hasRunning ? <Loader2 size={12} className="spinner" /> : <Wrench size={12} />}
-            <span>Working</span>
-            <span className="trace-summary">{parts.join(" · ")}{toolNames ? ` · ${toolNames}` : ""}</span>
-          </button>
-          {expanded && (
-            <div className="streaming-trace-body">
-              {renderMergedEntries(entries)}
-            </div>
-          )}
-        </>
+        <PathNode dotKind="trace" dotTone="active">
+          <TraceCard trace={trace} active />
+        </PathNode>
       )}
-      <div className="message-role">
-        <Loader2 size={12} className="spinner" />
-        Assistant streaming...
-        {message.stopReason === "aborted" && <span className="badge badge-warn">Aborted</span>}
-        {message.stopReason === "error" && <span className="badge badge-error">Error</span>}
-      </div>
-      <div className="message-body">
-        {textBlocks.map((b, i) => (
-          <Markdown key={i} text={b.text || ""} />
-        ))}
-        {imageBlocks.length > 0 && <ResultContent blocks={imageBlocks} />}
-        {otherBlocks.length > 0 && <ResultContent blocks={otherBlocks} />}
-        {!hasTrace && message.stopReason === "aborted" && (
-          <div className="assistant-error">{message.errorMessage || "Operation aborted"}</div>
-        )}
-        {!hasTrace && message.stopReason === "error" && (
-          <div className="assistant-error">Error: {message.errorMessage || "Unknown error"}</div>
-        )}
-      </div>
-    </article>
-  );
-}
-
-// ============================================================================
-// Tool execution bubble
-// ============================================================================
-
-function TraceBubble({ trace, defaultExpanded = false, active = false }: { trace: ExecutionTrace; defaultExpanded?: boolean; active?: boolean }) {
-  const [expanded, setExpanded] = useState(defaultExpanded);
-  const thinkingBlocks = trace.entries.filter((e) => e.kind === "thinking").map((e) => e.block);
-  const toolEvents = trace.entries.filter((e) => e.kind === "tool").map((e) => e.event);
-  const thinkingCount = thinkingBlocks.length;
-  const toolCount = toolEvents.length;
-  const hasRunning = active || toolEvents.some((tool) => tool.status === "running" || tool.status === "pending");
-  const parts = [
-    thinkingCount > 0 ? `${thinkingCount} thinking` : "",
-    toolCount > 0 ? `${toolCount} action${toolCount === 1 ? "" : "s"}` : ""
-  ].filter(Boolean);
-  const toolNames = toolEvents.map((tool) => tool.toolName).filter(Boolean).join(", ");
-
-  if (thinkingCount === 0 && toolCount === 0) return null;
-
-  return (
-    <article className={`message trace${hasRunning ? " active" : ""}`}>
-      <button className="trace-toggle" onClick={() => setExpanded(!expanded)}>
-        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        {hasRunning ? <Loader2 size={12} className="spinner" /> : <Wrench size={12} />}
-        <span>{active ? "Working" : "Trace"}</span>
-        <span className="trace-summary">{parts.join(" · ")}{toolNames ? ` · ${toolNames}` : ""}</span>
-      </button>
-      {expanded && (
-        <div className="trace-body">
-          {thinkingCount > 0 && (
-            <div className="thinking-section trace-thinking">
-              <div className="trace-section-label">Thinking</div>
-              <div className="thinking-content">
-                {thinkingBlocks.map((block, i) => (
-                  <pre key={i}>{block.thinking || ""}</pre>
-                ))}
-              </div>
-            </div>
-          )}
-          {toolCount > 0 && (
-            <div className="trace-tools">
-              <div className="trace-section-label">Actions</div>
-              <div className="trace-tool-list">
-                {toolEvents.map((tool, i) => (
-                  <ToolExecutionBubble key={tool.toolCallId || i} tool={tool} />
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </article>
+      <PathNode dotKind="assistant">
+        <article className="message assistant streaming">
+          <div className="message-role">
+            <Loader2 size={12} className="spinner" />
+            {message.role && message.role !== "assistant" ? `${message.role} streaming...` : "Assistant streaming..."}
+            {message.stopReason === "aborted" && <span className="badge badge-warn">Aborted</span>}
+            {message.stopReason === "error" && <span className="badge badge-error">Error</span>}
+          </div>
+          <div className="message-body">
+            {textBlocks.map((b, i) => (
+              <Markdown key={i} text={b.text || ""} />
+            ))}
+            {imageBlocks.length > 0 && <ResultContent blocks={imageBlocks} />}
+            {otherBlocks.length > 0 && <ResultContent blocks={otherBlocks} />}
+            {!hasTrace && message.stopReason === "aborted" && (
+              <div className="assistant-error">{message.errorMessage || "Operation aborted"}</div>
+            )}
+            {!hasTrace && message.stopReason === "error" && (
+              <div className="assistant-error">Error: {message.errorMessage || "Unknown error"}</div>
+            )}
+          </div>
+        </article>
+      </PathNode>
+    </>
   );
 }
 
@@ -1406,15 +1477,6 @@ function ToolGroupBubble({ events }: { events: { kind: "toolEvent"; event: ToolE
       )}
     </article>
   );
-}
-
-function formatArgSummary(args: JsonValue | undefined): string {
-  if (!args || typeof args !== "object" || Array.isArray(args)) return "";
-  const entries = Object.entries(args as Record<string, unknown>).filter(([, v]) => v !== undefined);
-  if (entries.length === 0) return "";
-  const [k, v] = entries[0];
-  const s = typeof v === "string" ? v : JSON.stringify(v);
-  return `${k}: ${s.length > 80 ? s.slice(0, 77) + "..." : s}`;
 }
 
 function ToolExecutionBubble({ tool, collapsed }: { tool: ToolExecutionEvent; collapsed?: boolean }) {
@@ -1751,286 +1813,55 @@ function GenericBubble({ message }: { message: AgentMessage }) {
 // ============================================================================
 // Helpers
 // ============================================================================
-function extractText(message: AgentMessage): string {
-  const direct = message.content ?? message.text ?? message.message;
-  if (typeof direct === "string") return direct;
-  if (Array.isArray(direct)) {
-    return direct
-      .map((item) => {
-        if (typeof item === "string") return item;
-        if (item && typeof item === "object" && "text" in item && typeof item.text === "string") return item.text;
-        return JSON.stringify(item, null, 2);
-      })
-      .join("\n");
-  }
-  if (direct !== undefined) return JSON.stringify(direct, null, 2);
-  return JSON.stringify(message, null, 2);
-}
-
-function extractContentBlocks(message: AgentMessage): ContentBlock[] {
-  const content = message.content;
-  if (Array.isArray(content)) {
-    return content.map((item) => {
-      if (typeof item === "string") return { type: "text", text: item } satisfies ContentBlock;
-      if (item && typeof item === "object") {
-        const block = item as Record<string, unknown>;
-        const blockType = String(block.type || "text");
-        if (blockType === "thinking" && typeof block.thinking === "string") {
-          return { type: "thinking", thinking: block.thinking } satisfies ContentBlock;
-        }
-        if (blockType === "text" && typeof block.text === "string") {
-          return { type: "text", text: block.text } satisfies ContentBlock;
-        }
-        if (blockType === "toolCall" && typeof block.name === "string" && typeof block.id === "string") {
-          return { type: "toolCall", name: block.name, id: block.id, input: (block.input as JsonValue) ?? null } satisfies ContentBlock;
-        }
-        if (blockType === "image" && typeof block.data === "string" && typeof block.mimeType === "string") {
-          return { type: "image", data: block.data, mimeType: block.mimeType } satisfies ContentBlock;
-        }
-        return { type: "text", text: typeof block.text === "string" ? block.text : JSON.stringify(block) } satisfies ContentBlock;
-      }
-      return { type: "text", text: JSON.stringify(item) } satisfies ContentBlock;
-    });
-  }
-  const text = extractText(message);
-  return text ? [{ type: "text", text }] : [];
-}
-
-function buildStreamingTrace(message: StreamingMessage, toolEvents: ToolExecutionEvent[]): ExecutionTrace {
-  const toolCallIds = new Set<string>();
-  const toolMap = new Map<string, ToolExecutionEvent>();
-  const entries: TraceEntry[] = [];
-
-  for (const tool of toolEvents) {
-    if (tool.toolCallId) toolMap.set(tool.toolCallId, tool);
-  }
-
-  for (const [blockIndex, block] of message.content.entries()) {
-    if (block.type === "thinking") {
-      entries.push({ kind: "thinking", block, key: `thinking-${blockIndex}` });
-      continue;
-    }
-    if (block.type !== "toolCall" || !block.id || !block.name) continue;
-
-    const toolCallId = String(block.id);
-    toolCallIds.add(toolCallId);
-    const pendingTool: ToolExecutionEvent = {
-      toolCallId,
-      toolName: String(block.name),
-      args: (block.input ?? block.arguments ?? undefined) as JsonValue | undefined,
-      timestamp: message.timestamp,
-      status: "pending"
-    };
-    entries.push({
-      kind: "tool",
-      key: `tool-${toolCallId}`,
-      event: { ...pendingTool, ...toolMap.get(toolCallId) }
-    });
-  }
-
-  for (const tool of toolEvents) {
-    if (toolCallIds.has(tool.toolCallId)) continue;
-    entries.push({ kind: "tool", event: tool, key: `tool-live-${tool.toolCallId}` });
-  }
-
-  return {
-    id: message.id || String(message.timestamp || "streaming"),
-    entries,
-    active: true
-  };
-}
-
-function traceShapeKey(blocks: ContentBlock[]): string {
-  return blocks
-    .map((block, index) => {
-      if (block.type === "thinking") return `thinking:${index}:${block.thinking?.length ?? 0}`;
-      if (block.type === "toolCall") return `tool:${block.id || index}:${block.name || ""}`;
-      return "";
-    })
-    .filter(Boolean)
-    .join("|");
-}
-
-function hasAssistantDisplayContent(message: AgentMessage): boolean {
-  if (message.errorMessage) return true;
-  return extractContentBlocks(message).some((block) =>
-    block.type === "text" && Boolean(block.text?.trim()) ||
-    block.type === "image" ||
-    !["thinking", "toolCall"].includes(block.type)
-  );
-}
 
 function renderTimelineItem(item: TimelineItem, index: number, prefix = "history"): React.ReactNode {
   if (item.kind === "message") {
-    return <MessageBubble key={`${prefix}-${messageKey(item.message, index)}`} message={item.message} />;
+    const msg = item.message;
+    const dotKind = msg.role === "user" ? "user" : msg.role === "assistant" ? "assistant" : "";
+    return (
+      <PathNode key={`${prefix}-${messageKey(msg, index)}`} dotKind={dotKind}>
+        <MessageBubble message={msg} />
+      </PathNode>
+    );
   }
   if (item.kind === "trace") {
-    return <TraceBubble key={`${prefix}-trace-${item.trace.id || index}`} trace={item.trace} />;
+    const trace = item.trace;
+    const overall = traceOverallStatus(trace.entries, false);
+    return (
+      <PathNode key={`${prefix}-trace-${trace.id || index}`} dotKind="trace" dotTone={overall}>
+        <TraceCard trace={trace} />
+      </PathNode>
+    );
   }
   if (item.kind === "toolEvent") {
-    return <ToolExecutionBubble key={`${prefix}-tool-${item.event.toolCallId || index}`} tool={item.event} />;
+    const event = item.event;
+    const tone = event.isError ? "error" as const : event.status === "complete" || (!event.status && event.result) ? "ok" as const : "active" as const;
+    return (
+      <PathNode key={`${prefix}-tool-${event.toolCallId || index}`} dotKind="tool-result" dotTone={tone}>
+        <ToolExecutionBubble tool={event} />
+      </PathNode>
+    );
   }
   if (item.kind === "toolGroup") {
     const ids = item.events.map((event, i) => event.event.toolCallId || i).join(":");
-    return <ToolGroupBubble key={`${prefix}-tg-${ids || index}`} events={item.events} />;
+    return (
+      <PathNode key={`${prefix}-tg-${ids || index}`} dotKind="tool-result" dotTone="ok">
+        <ToolGroupBubble events={item.events} />
+      </PathNode>
+    );
   }
-  return <ActivityBubble key={`${prefix}-activity-${item.event.id}`} event={item.event} />;
-}
-
-function collapseToolGroups(items: TimelineItem[]): TimelineItem[] {
-  const collapsed: TimelineItem[] = [];
-  let toolGroup: { kind: "toolEvent"; event: ToolExecutionEvent }[] = [];
-
-  for (const item of items) {
-    if (item.kind === "toolEvent") {
-      toolGroup.push(item);
-      continue;
-    }
-
-    flushToolGroup(collapsed, toolGroup);
-    toolGroup = [];
-    collapsed.push(item);
-  }
-
-  flushToolGroup(collapsed, toolGroup);
-  return collapsed;
-}
-
-function flushToolGroup(target: TimelineItem[], toolGroup: { kind: "toolEvent"; event: ToolExecutionEvent }[]) {
-  if (toolGroup.length >= 2) {
-    target.push({ kind: "toolGroup", events: toolGroup });
-  } else if (toolGroup.length === 1 && toolGroup[0]) {
-    target.push(toolGroup[0]);
-  }
-}
-
-function mergeMessages(current: AgentMessage[], incoming: AgentMessage[]): AgentMessage[] {
-  if (current.length === 0) return dedupeMessages(incoming);
-
-  const result = [...current];
-  const seen = new Set(result.map((message, index) => messageKey(message, index)));
-
-  for (const message of incoming) {
-    const key = messageKey(message);
-    if (seen.has(key)) continue;
-
-    const localDuplicateIndex = findLocalUserDuplicate(result, message);
-    if (localDuplicateIndex >= 0) {
-      const previousKey = messageKey(result[localDuplicateIndex]!, localDuplicateIndex);
-      result[localDuplicateIndex] = message;
-      seen.delete(previousKey);
-      seen.add(key);
-      continue;
-    }
-
-    result.push(message);
-    seen.add(key);
-  }
-
-  return dedupeMessages(result);
-}
-
-function dedupeMessages(messages: AgentMessage[]): AgentMessage[] {
-  const result: AgentMessage[] = [];
-  const seen = new Set<string>();
-
-  for (const message of messages) {
-    const key = messageKey(message, result.length);
-    if (seen.has(key)) continue;
-
-    const localDuplicateIndex = findLocalUserDuplicate(result, message);
-    if (localDuplicateIndex >= 0) {
-      const previousKey = messageKey(result[localDuplicateIndex]!, localDuplicateIndex);
-      result[localDuplicateIndex] = message;
-      seen.delete(previousKey);
-    } else {
-      result.push(message);
-    }
-    seen.add(messageKey(message, result.length - 1));
-  }
-
-  return result;
-}
-
-function findLocalUserDuplicate(messages: AgentMessage[], incoming: AgentMessage): number {
-  if (incoming.role !== "user" || Boolean(incoming.localOnly)) return -1;
-  const incomingText = extractText(incoming);
-  if (!incomingText) return -1;
-
-  return messages.findIndex((message) =>
-    message.role === "user" &&
-    Boolean(message.localOnly) &&
-    extractText(message) === incomingText
+  return (
+    <PathNode key={`${prefix}-activity-${item.event.id}`} dotKind="activity" dotTone="activity">
+      <ActivityBubble event={item.event} />
+    </PathNode>
   );
 }
 
-function messageKey(message: AgentMessage, fallbackIndex = -1): string {
-  if (typeof message.id === "string") return `id:${message.id}`;
-  if (typeof message.responseId === "string") return `response:${message.responseId}`;
-  if (typeof message.timestamp === "number") return `timestamp:${message.timestamp}:${message.role ?? message.type ?? ""}:${extractText(message)}`;
-  return `content:${message.role ?? message.type ?? ""}:${extractText(message)}:${fallbackIndex}`;
-}
-
-function shouldDisplayActivity(event: ActivityEvent): boolean {
-  return event.type !== "turn_start" && event.type !== "turn_end";
-}
-
-function summarizeContentBlocks(blocks: ContentBlock[]): string {
-  const firstText = blocks.find((block) => block.type === "text" && block.text?.trim());
-  if (firstText?.text) {
-    const compact = firstText.text.replace(/\s+/g, " ").trim();
-    return compact.length > 96 ? `${compact.slice(0, 96)}...` : compact;
-  }
-  if (blocks.some((block) => block.type === "image")) return "Image result";
-  if (blocks.length > 0) return `${blocks.length} result block${blocks.length === 1 ? "" : "s"}`;
-  return "";
-}
-
-function appendToolEvent(current: ToolExecutionEvent[], event: ToolExecutionEvent): ToolExecutionEvent[] {
-  const idx = current.findIndex((existing) => existing.toolCallId === event.toolCallId);
-  if (idx >= 0) {
-    const updated = [...current];
-    updated[idx] = { ...current[idx], ...event, timestamp: current[idx]?.timestamp ?? event.timestamp };
-    return updated;
-  }
-  return [...current, event];
-}
-
-function isUnknownDisplayEvent(event: PiRpcEvent): boolean {
-  const shown = new Set(["agent_start", "agent_end", "turn_start", "turn_end",
-    "message_start", "message_update", "message_end", "message_complete", "message_partial",
-    "tool_execution_start", "tool_execution_update", "tool_execution_end",
-    "compaction_start", "compaction_end", "compaction_snapshot",
-    "queue_update", "queue_message",
-    "thinking_level_changed", "session_info_changed",
-    "auto_retry_start", "auto_retry_end", "response", "error"]);
-  return !shown.has(event.type) && event.type !== "extension_ui_request";
-}
-
-function formatMs(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function stripAnsiDisplay(text: string): string {
-  // Strip SGR (Select Graphic Rendition) sequences: ESC[ param ; param m
-  // Also handles OSC 133 terminal markers
-  return text
-    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
-    .replace(/\x1b\]133;[ABC]\x07/g, "");
-}
+/** Status progression: pending → running → complete. Never regress. */
 
 // ============================================================================
 // Stats bar
 // ============================================================================
-
-function formatTokens(count: number): string {
-  if (count < 1000) return count.toString();
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-  if (count < 1000000) return `${Math.round(count / 1000)}k`;
-  if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
-  return `${Math.round(count / 1000000)}M`;
-}
 
 function StatsBar({
   stats,
@@ -2086,10 +1917,13 @@ function StatsBar({
 }
 
 // ============================================================================
-// Bootstrap
+// Bootstrap (skipped in test / SSR environments)
 // ============================================================================
-createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+const rootEl = typeof document !== "undefined" ? document.getElementById("root") : null;
+if (rootEl) {
+  createRoot(rootEl).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  );
+}

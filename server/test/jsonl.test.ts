@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { JsonlParser } from "../src/jsonl.js";
+import { JsonlParser } from "../src/pi-rpc-client.js";
 
 describe("JsonlParser", () => {
   it("parses fragmented JSONL records", () => {
