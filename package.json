@@ -21,7 +21,8 @@
   },
   "files": [
     "dist/",
-    "bin/"
+    "bin/",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "dev": "npm run build:web && tsx server/src/index.ts",
