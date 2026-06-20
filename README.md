@@ -74,6 +74,8 @@ npm run typecheck
 npm test
 ```
 
+📋 [查看完整的变更日志](https://github.com/Watercol/pi-web-ui/blob/main/CHANGELOG.md)
+
 ## License
 
 MIT
