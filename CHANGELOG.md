@@ -3,42 +3,51 @@
 ## 0.2.1 — 2026-06-20
 
 ### Added
-- README 添加 Pi Web UI 截图展示
-- README 添加 CHANGELOG 链接
-- CHANGELOG.md 纳入发布的 npm 包中
+- README: added Pi Web UI screenshot
+- README: added CHANGELOG link
+- CHANGELOG.md included in the published npm package
 
 ## 0.2.0 — 2026-06-20
 
 ### Added
-- 双层路径图 trace 展示：会话级实线竖线 + trace 内部虚线，节点圆点颜色表示状态
-  （琥珀=进行中，绿色=已完成，红色=异常），右侧附文字摘要
-- `PathNode`：Layer 1 节点包裹器，统一管理圆点和卡片布局
-- `TraceCard`：可折叠 trace 卡片，内嵌 Layer 2 子路径图
-- `SubPath`：Layer 2 子路径容器，虚线竖线 + 连续完成工具自动合并
-- `SubNode`：Layer 2 thinking / tool 条目节点，可展开查看详情
-- `SubGroup`：≥2 个连续已完成 tool 的合并折叠组
-- `traceEntryStatusColor` / `traceOverallStatus`：路径图颜色判定工具函数
-- Web 端测试基础设施（jsdom + @testing-library/react），19 个行为测试
+- Dual-layer path trace view: session-level solid vertical lines + trace-level dashed lines,
+  node dot color indicates status (amber=in-progress, green=completed, red=error),
+  with text summary on the right
+- `PathNode`: Layer 1 node wrapper, manages dot and card layout uniformly
+- `TraceCard`: foldable trace card embedding Layer 2 sub-path view
+- `SubPath`: Layer 2 sub-path container with dashed vertical line and auto-merge for
+  consecutive completed tools
+- `SubNode`: Layer 2 thinking/tool entry node, expandable for details
+- `SubGroup`: collapse group for 2+ consecutive completed tools
+- `traceEntryStatusColor` / `traceOverallStatus`: path trace color utility functions
+- Web test infrastructure (jsdom + @testing-library/react), 19 behavior tests
 
 ### Removed
-- `TraceBubble`：替换为 `TraceCard` + `SubPath`
-- `CompactToolGroup`：替换为 `SubGroup`
-- `renderMergedEntries`：合并逻辑移入 `SubPath`
+- `TraceBubble`: replaced by `TraceCard` + `SubPath`
+- `CompactToolGroup`: replaced by `SubGroup`
+- `renderMergedEntries`: merge logic moved into `SubPath`
 
 ### Changed
-- 样式全面简化：移除消息卡片的背景/圆角边框，改为纯文字 + 左边线 + 圆点，简洁现代
-- `message-list` → `session-path`：新的路径图布局容器
-- `StreamingAssistantCard`：内部 trace 改用 `TraceCard` + `PathNode` 包裹
-- `renderTimelineItem`：每种时间线条目包裹 `PathNode` 以统一路径图样式
-- 提取共享类型（`ExecutionTrace`、`TraceEntry`、`TimelineItem`）为导出类型
-- `parseJsonlSession` / `writeJsonlRecord` 移至 `pi-rpc-client.ts`，删除 `server/src/jsonl.ts`
+- Styles fully simplified: removed card backgrounds/rounded borders, switched to
+  plain text + left border + dot, giving a clean modern look
+- `message-list` → `session-path`: new path trace layout container
+- `StreamingAssistantCard`: internal trace now uses `TraceCard` + `PathNode`
+- `renderTimelineItem`: each timeline entry wrapped in `PathNode` for consistent
+  path trace styling
+- Shared types (`ExecutionTrace`, `TraceEntry`, `TimelineItem`) extracted as exports
+- `parseJsonlSession` / `writeJsonlRecord` moved to `pi-rpc-client.ts`, removed
+  `server/src/jsonl.ts`
 
 ### Fixed
-- 长文本流式卡顿：自适应节流（短文本 32ms → 长文本 150ms），根据文本长度动态调整刷新率
-- 无效 `setStreamingMessage` 调用：新增 text hash 守卫，仅文本实际变化时触发重渲染
-- `Markdown` 组件重复解析：Ref 缓存跳过相同文本的冗余 `marked.parse()`
-- 纯 thinking（无 tool）trace 完成时显示绿色而非卡在黄色
-- `traceShapeKey` 仅在必要时计算
+- Long text streaming stutter: adaptive throttling (short text 32ms → long text 150ms),
+  dynamically adjusts refresh rate based on text length
+- Invalid `setStreamingMessage` calls: added text hash guard, only triggers re-render
+  when text actually changes
+- `Markdown` component duplicate parsing: ref cache skips redundant `marked.parse()`
+  for identical text
+- Pure-thinking (no tool) traces now show green on completion instead of getting
+  stuck on amber
+- `traceShapeKey` computed only when necessary
 
 ## 0.1.6 — 2026-06-19
 
