@@ -5,3 +5,5 @@ dist/
 *.tgz
 AGENT.md
 CLAUDE.md
+rpc-traffic.jsonl
+record-rpc.js
