@@ -1,6 +1,6 @@
 {
   "name": "@watercol/pi-web-ui",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "description": "Web-based TUI for the pi coding agent",
   "license": "MIT",
   "author": "",
