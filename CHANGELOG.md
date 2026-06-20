@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.2 — 2026-06-20
+
+### Added
+- SSE message_update coalescing: buffers rapid streaming events and flushes every
+  200ms, cutting SSE traffic by ~92% (~5 events/s instead of 60+)
+- Toast notification stack for activity events (retries, thinking level changes,
+  extension errors, compaction results) with auto-dismiss, replace groups, and
+  cascade-dismiss semantics
+- `useDeferredValue` on the streaming message to keep scrolling and tool updates
+  responsive during high-frequency LLM output
+
+### Changed
+- Activity events (retries, notifications, errors) now appear as toasts in the
+  top-right corner instead of inline timeline bubbles
+- Compaction progress shown via the Stream status badge rather than a separate
+  `compaction-notice` element
+
+### Removed
+- Inline activity bubble components (`ActivityBubble`, `NoticeBubble`,
+  `ExtensionUiBubble`, `RawEventBubble`) — superseded by the toast stack
+- `activity` variant from the `TimelineItem` union type
+- Vertical connector line (`path-line`) inside the session-path message list
+
+### Fixed
+- `fetchState` used a stale closure for `displayStats` fallback; switched to
+  functional updater
+
 ## 0.2.1 — 2026-06-20
 
 ### Added
