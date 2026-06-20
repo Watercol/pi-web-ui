@@ -2,6 +2,8 @@
 
 A web-based terminal UI for the [pi](https://github.com/earendil-works/pi-coding-agent) coding agent. Connect to a running pi session through your browser.
 
+![Pi Web UI 截图](https://raw.githubusercontent.com/Watercol/pi-web-ui/main/docs/Pi_Web_UI_example_01.png)
+
 ## Prerequisites
 
 - **Node.js >= 20**
