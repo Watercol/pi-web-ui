@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { ActivityEvent, AgentMessage, ContentBlock, JsonValue, PiRpcCommand, PiRpcEvent, PiRpcResponse, PiState, QueueState, SessionStats, StreamingMessage, ToolExecutionEvent } from "../../shared/src/index.js";
 import { buildPiArgs, type ServerConfig } from "./config.js";
+import { resolveGitBranch } from "./git-branch.js";
 
 // --- JSONL parser (inlined from jsonl.ts to keep import depth ≤ 2) ---
 
@@ -107,8 +108,11 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
   private messageUpdateTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly MESSAGE_UPDATE_COALESCE_MS = 200;
 
+  private readonly gitBranch: string | null;
+
   constructor(private readonly config: ServerConfig) {
     super();
+    this.gitBranch = resolveGitBranch(this.config.cwd);
   }
 
   start(): void {
@@ -160,6 +164,7 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
   getState(): PiState {
     return {
       cwd: this.config.cwd,
+      gitBranch: this.gitBranch,
       piBin: this.config.piBin,
       model: this.lastStateData.model ?? null,
       thinkingLevel: this.lastStateData.thinkingLevel,

@@ -60,6 +60,7 @@ export type SessionStats = {
 
 export type PiState = {
   cwd: string;
+  gitBranch?: string | null;
   piBin: string;
   model: PiModel | null;
   thinkingLevel?: string;

@@ -769,7 +769,7 @@ function App() {
           <Terminal size={20} />
           <div>
             <h1>Pi Web UI</h1>
-            <p>{state.cwd || "Loading workspace"}</p>
+            <p>{state.cwd || "Loading workspace"}{state.gitBranch ? ` (${state.gitBranch})` : ""}</p>
           </div>
         </div>
         <div className="status-grid">
