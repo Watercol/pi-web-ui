@@ -244,6 +244,10 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
     return response;
   }
 
+  async getCommands(): Promise<PiRpcResponse> {
+    return this.request("get_commands");
+  }
+
   async setThinkingLevel(level: string): Promise<PiRpcResponse> {
     const response = await this.request("set_thinking_level", { level });
     if (response.success) {
@@ -488,10 +492,8 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
       tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
     }
 
-    const contextWindow = this.extractContextWindow();
-    if (!hasUsage && !contextWindow) return undefined;
+    if (!hasUsage) return undefined;
 
-    const promptTokens = tokens.input + tokens.cacheRead + tokens.cacheWrite;
     return {
       sessionFile: this.lastStateData.sessionFile,
       sessionId: this.lastStateData.sessionId || "",
@@ -501,14 +503,7 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
       toolResults,
       totalMessages: messages.length,
       tokens,
-      cost,
-      contextUsage: contextWindow
-        ? {
-            tokens: promptTokens > 0 ? promptTokens : null,
-            contextWindow,
-            percent: promptTokens > 0 ? (promptTokens / contextWindow) * 100 : null
-          }
-        : undefined
+      cost
     };
   }
 
@@ -519,8 +514,16 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
     return true;
   }
 
+  /**
+   * Ensure stats include contextUsage with the most accurate context window available.
+   * Priority: incoming stats' own contextUsage (from refreshStats Pi RPC),
+   * then lastStats preserved from prior refreshStats calls, then extractContextWindow
+   * as a fallback from model/state config.
+   */
   private withContextWindow(stats: SessionStats): SessionStats {
-    const contextWindow = stats.contextUsage?.contextWindow || this.extractContextWindow();
+    const contextWindow = stats.contextUsage?.contextWindow
+      || this.lastStats?.contextUsage?.contextWindow
+      || this.extractContextWindow();
     if (!contextWindow) return stats;
 
     const promptTokens = stats.contextUsage?.tokens ?? stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite;

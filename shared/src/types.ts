@@ -184,3 +184,11 @@ export type SessionSwitchRequest = {
 export type ThinkingLevelSwitchRequest = {
   level: string;
 };
+
+/** Slash command returned by Pi RPC get_commands */
+export type PiSlashCommand = {
+  name: string;
+  description?: string;
+  source: "builtin" | "extension" | "prompt" | "skill";
+  sourceInfo?: { source: string; scope: string; path?: string };
+};

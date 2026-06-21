@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useDeferredValue } from "react";
 import { createRoot } from "react-dom/client";
 import { CircleStop, RefreshCcw, SendHorizontal, Terminal, Wrench, Monitor, FileCode, AlertTriangle, Loader2, ChevronDown, ChevronRight, Check, Plus } from "lucide-react";
-import type { ActivityEvent, AgentMessage, JsonValue, PiModel, PiSessionInfo, PiState, ServerEvent, SessionStats, StreamingMessage, ToolExecutionEvent, ContentBlock, QueueState } from "../../shared/src/index.js";
+import type { ActivityEvent, AgentMessage, JsonValue, PiModel, PiSessionInfo, PiSlashCommand, PiState, ServerEvent, SessionStats, StreamingMessage, ToolExecutionEvent, ContentBlock, QueueState } from "../../shared/src/index.js";
 import { marked } from "marked";
 import "./styles.css";
 import { MAX_VISIBLE_MESSAGES, emptyState, resizeComposerTextarea, modelDisplayName, modelKey, thinkingLevelLabel, supportedThinkingLevels, sessionDisplayName, formatRelativeTime, formatArgSummary, extractText, extractContentBlocks, buildStreamingTrace, traceShapeKey, hasAssistantDisplayContent, collapseToolGroups, mergeMessages, messageKey, shouldDisplayActivity, summarizeContentBlocks, appendToolEvent, isUnknownDisplayEvent, stripAnsiDisplay, formatTokens, traceEntryStatusColor, traceOverallStatus } from "./lib/helpers.js";
@@ -77,6 +77,7 @@ function App() {
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const sessionMenuRef = useRef<HTMLDivElement>(null);
   const thinkingMenuRef = useRef<HTMLDivElement>(null);
+  const commandMenuRef = useRef<HTMLDivElement>(null);
 
   // --- streaming state ---
   const [streamingMessage, setStreamingMessage] = useState<StreamingMessage | undefined>();
@@ -100,6 +101,10 @@ function App() {
   const [creatingSession, setCreatingSession] = useState(false);
   const [thinkingMenuOpen, setThinkingMenuOpen] = useState(false);
   const [switchingThinkingLevel, setSwitchingThinkingLevel] = useState<string | undefined>();
+  const [slashCommands, setSlashCommands] = useState<PiSlashCommand[]>([]);
+  const [commandMenuOpen, setCommandMenuOpen] = useState(false);
+  const [commandFilter, setCommandFilter] = useState("");
+  const [commandIndex, setCommandIndex] = useState(0);
 
   const { pushToast } = useToast();
 
@@ -148,6 +153,7 @@ function App() {
   useEffect(() => {
     void fetchState();
     void fetchMessages();
+    void fetchCommands();
 
     const source = new EventSource("/api/events");
     source.onopen = () => {
@@ -321,7 +327,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!modelMenuOpen && !sessionMenuOpen && !thinkingMenuOpen) return;
+    if (!modelMenuOpen && !sessionMenuOpen && !thinkingMenuOpen && !commandMenuOpen) return;
 
     const handlePointerDown = (event: PointerEvent) => {
       if (!modelMenuRef.current?.contains(event.target as Node)) {
@@ -333,10 +339,19 @@ function App() {
       if (!thinkingMenuRef.current?.contains(event.target as Node)) {
         setThinkingMenuOpen(false);
       }
+      if (!commandMenuRef.current?.contains(event.target as Node)) {
+        setCommandMenuOpen(false);
+      }
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        // Close command menu first if open (textarea Esc is for abort/interrupt)
+        if (commandMenuOpen) {
+          setCommandMenuOpen(false);
+          event.stopPropagation();
+          return;
+        }
         setModelMenuOpen(false);
         setSessionMenuOpen(false);
         setThinkingMenuOpen(false);
@@ -349,7 +364,7 @@ function App() {
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [modelMenuOpen, sessionMenuOpen, thinkingMenuOpen]);
+  }, [modelMenuOpen, sessionMenuOpen, thinkingMenuOpen, commandMenuOpen]);
 
   useLayoutEffect(() => {
     const el = textareaRef.current;
@@ -508,6 +523,14 @@ function App() {
     } finally {
       setModelsLoading(false);
     }
+  }
+
+  async function fetchCommands() {
+    try {
+      const response = await fetch("/api/commands");
+      const body = (await response.json()) as { commands?: PiSlashCommand[] };
+      if (Array.isArray(body.commands)) setSlashCommands(body.commands);
+    } catch { /* silently ignore — command bar works without server data */ }
   }
 
   async function toggleModelMenu() {
@@ -700,6 +723,45 @@ function App() {
 
   const queueCount = queueState.steering.length + queueState.followUp.length;
 
+  // Refs for command menu scrolling
+  const commandItemRefs = useRef<(HTMLDivElement | null)[]>([]);
+
+  // Filtered slash commands for the command menu
+  const filteredCommands = useMemo(() => {
+    const q = commandFilter.toLowerCase();
+    if (!q) return slashCommands;
+    return slashCommands.filter((cmd) =>
+      cmd.name.toLowerCase().includes(q) ||
+      (cmd.description || "").toLowerCase().includes(q)
+    );
+  }, [slashCommands, commandFilter]);
+
+  // Scroll active command item into view when index changes
+  useEffect(() => {
+    if (!commandMenuOpen) return;
+    const el = commandItemRefs.current[commandIndex];
+    if (el) el.scrollIntoView({ block: "center" });
+  }, [commandIndex, commandMenuOpen]);
+
+  // Reset refs array when filtered list changes
+  useEffect(() => {
+    commandItemRefs.current = [];
+  }, [filteredCommands]);
+
+  // Select a command and insert into the textarea
+  function selectCommand(cmd: PiSlashCommand) {
+    const text = `/${cmd.name} `;
+    setDraft(text);
+    setCommandMenuOpen(false);
+    setTimeout(() => {
+      const el = textareaRef.current;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(text.length, text.length);
+      }
+    }, 0);
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -802,19 +864,95 @@ function App() {
       </section>
 
       <footer className="composer">
+        {commandMenuOpen && filteredCommands.length > 0 && (
+          <div ref={commandMenuRef} className="command-menu" onMouseDown={(event) => event.preventDefault()}>
+            {filteredCommands.map((cmd, index) => (
+              <div
+                key={cmd.name}
+                ref={(el) => { commandItemRefs.current[index] = el; }}
+                role="option"
+                aria-selected={index === commandIndex}
+                className={`command-item${index === commandIndex ? " active" : ""}`}
+                onClick={() => selectCommand(cmd)}
+                onMouseEnter={() => setCommandIndex(index)}
+              >
+                <span className="command-name">/{cmd.name}</span>
+                {cmd.description && <span className="command-desc">{cmd.description}</span>}
+                {cmd.source !== "builtin" && (
+                  <span className="command-source">{cmd.source}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         <textarea
           ref={textareaRef}
           value={draft}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => {
+            const val = event.target.value;
+            setDraft(val);
+            // Toggle command menu when user types / at line start
+            if (val.startsWith("/") && !val.includes(" ") && val.length >= 1) {
+              setCommandMenuOpen(true);
+              setCommandFilter(val.slice(1));
+              setCommandIndex(0);
+            } else if (val.startsWith("/") && val.includes(" ")) {
+              setCommandMenuOpen(false);
+            } else {
+              setCommandMenuOpen(false);
+            }
+          }}
           onCompositionStart={() => { composingRef.current = true; }}
           onCompositionEnd={() => { composingRef.current = false; }}
           onKeyDown={(event) => {
+            if (commandMenuOpen && filteredCommands.length > 0) {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setCommandMenuOpen(false);
+                return;
+              }
+              if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setCommandIndex((prev) => Math.max(0, prev - 1));
+                return;
+              }
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setCommandIndex((prev) => Math.min(filteredCommands.length - 1, prev + 1));
+                return;
+              }
+              if (event.key === "Enter" && !event.shiftKey && !composingRef.current) {
+                event.preventDefault();
+                const cmd = filteredCommands[commandIndex];
+                if (cmd) selectCommand(cmd);
+                return;
+              }
+              // Tab selects and keeps menu open for argument completion
+              if (event.key === "Tab") {
+                event.preventDefault();
+                const cmd = filteredCommands[commandIndex];
+                if (cmd) {
+                  setDraft(`/${cmd.name} `);
+                  setCommandMenuOpen(false);
+                  setTimeout(() => {
+                    const el = textareaRef.current;
+                    if (el) {
+                      el.focus();
+                      el.setSelectionRange(cmd.name.length + 2, cmd.name.length + 2);
+                    }
+                  }, 0);
+                }
+                return;
+              }
+              // Any other key: let it through to onChange which will update commandFilter
+              return;
+            }
             if (event.key === "Enter" && !event.shiftKey && !composingRef.current) {
               event.preventDefault();
               void sendPrompt();
             }
           }}
-          placeholder="Send a prompt to Pi"
+          placeholder="Send a prompt to Pi — type / for commands"
           disabled={!state.processRunning}
         />
         {state.isStreaming ? (

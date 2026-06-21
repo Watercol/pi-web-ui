@@ -168,6 +168,12 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, rp
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/commands") {
+    const response = await rpc.getCommands();
+    sendJson(res, 200, response.data ?? { commands: [] });
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/stats") {
     const stats = await rpc.refreshStats().catch(() => rpc.getSessionStats());
     sendJson(res, 200, stats ?? {});
