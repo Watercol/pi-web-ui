@@ -193,3 +193,10 @@ export type PiSlashCommand = {
   source: "builtin" | "extension" | "prompt" | "skill";
   sourceInfo?: { source: string; scope: string; path?: string };
 };
+
+/** File/directory entry returned by /api/files */
+export type FileEntry = {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+};

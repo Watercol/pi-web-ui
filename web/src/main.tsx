@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useDeferredValue } from "react";
 import { createRoot } from "react-dom/client";
-import { CircleStop, RefreshCcw, SendHorizontal, Terminal, Wrench, Monitor, FileCode, AlertTriangle, Loader2, ChevronDown, ChevronRight, Check, Plus } from "lucide-react";
-import type { ActivityEvent, AgentMessage, JsonValue, PiModel, PiSessionInfo, PiSlashCommand, PiState, ServerEvent, SessionStats, StreamingMessage, ToolExecutionEvent, ContentBlock, QueueState } from "../../shared/src/index.js";
+import { CircleStop, RefreshCcw, SendHorizontal, Terminal, Wrench, Monitor, FileCode, AlertTriangle, Loader2, ChevronDown, ChevronRight, Check, Plus, Folder, File } from "lucide-react";
+import type { ActivityEvent, AgentMessage, FileEntry, JsonValue, PiModel, PiSessionInfo, PiSlashCommand, PiState, ServerEvent, SessionStats, StreamingMessage, ToolExecutionEvent, ContentBlock, QueueState } from "../../shared/src/index.js";
 import { marked } from "marked";
 import "./styles.css";
 import { MAX_VISIBLE_MESSAGES, emptyState, resizeComposerTextarea, modelDisplayName, modelKey, thinkingLevelLabel, supportedThinkingLevels, sessionDisplayName, formatRelativeTime, formatArgSummary, extractText, extractContentBlocks, buildStreamingTrace, traceShapeKey, hasAssistantDisplayContent, collapseToolGroups, mergeMessages, messageKey, shouldDisplayActivity, summarizeContentBlocks, appendToolEvent, isUnknownDisplayEvent, stripAnsiDisplay, formatTokens, traceEntryStatusColor, traceOverallStatus } from "./lib/helpers.js";
@@ -78,6 +78,7 @@ function App() {
   const sessionMenuRef = useRef<HTMLDivElement>(null);
   const thinkingMenuRef = useRef<HTMLDivElement>(null);
   const commandMenuRef = useRef<HTMLDivElement>(null);
+  const fileMenuRef = useRef<HTMLDivElement>(null);
 
   // --- streaming state ---
   const [streamingMessage, setStreamingMessage] = useState<StreamingMessage | undefined>();
@@ -105,6 +106,10 @@ function App() {
   const [commandMenuOpen, setCommandMenuOpen] = useState(false);
   const [commandFilter, setCommandFilter] = useState("");
   const [commandIndex, setCommandIndex] = useState(0);
+  const [fileMenuOpen, setFileMenuOpen] = useState(false);
+  const [fileFilter, setFileFilter] = useState("");
+  const [fileIndex, setFileIndex] = useState(0);
+  const [fileEntries, setFileEntries] = useState<FileEntry[]>([]);
 
   const { pushToast } = useToast();
 
@@ -327,7 +332,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!modelMenuOpen && !sessionMenuOpen && !thinkingMenuOpen && !commandMenuOpen) return;
+    if (!modelMenuOpen && !sessionMenuOpen && !thinkingMenuOpen && !commandMenuOpen && !fileMenuOpen) return;
 
     const handlePointerDown = (event: PointerEvent) => {
       if (!modelMenuRef.current?.contains(event.target as Node)) {
@@ -342,11 +347,20 @@ function App() {
       if (!commandMenuRef.current?.contains(event.target as Node)) {
         setCommandMenuOpen(false);
       }
+      if (!fileMenuRef.current?.contains(event.target as Node)) {
+        setFileMenuOpen(false);
+      }
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        // Close command menu first if open (textarea Esc is for abort/interrupt)
+        // Close file menu first if open
+        if (fileMenuOpen) {
+          setFileMenuOpen(false);
+          event.stopPropagation();
+          return;
+        }
+        // Close command menu next if open (textarea Esc is for abort/interrupt)
         if (commandMenuOpen) {
           setCommandMenuOpen(false);
           event.stopPropagation();
@@ -364,7 +378,7 @@ function App() {
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [modelMenuOpen, sessionMenuOpen, thinkingMenuOpen, commandMenuOpen]);
+  }, [modelMenuOpen, sessionMenuOpen, thinkingMenuOpen, commandMenuOpen, fileMenuOpen]);
 
   useLayoutEffect(() => {
     const el = textareaRef.current;
@@ -762,6 +776,78 @@ function App() {
     }, 0);
   }
 
+  // --- File menu (@ file picker) ---
+  const fileItemRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const fileCacheRef = useRef<FileEntry[] | null>(null);
+
+  /** Detect @token ending at cursorPos. Returns { start, query } or null. */
+  function findAtToken(text: string, cursorPos: number): { start: number; query: string } | null {
+    // Scan backwards from cursorPos to find '@'
+    let i = cursorPos - 1;
+    while (i >= 0) {
+      const ch = text[i];
+      // Stop at whitespace or newline
+      if (ch === " " || ch === "\n" || ch === "\r" || ch === "\t") return null;
+      if (ch === "@") {
+        // Verify @ is at start of string or preceded by whitespace/newline
+        if (i === 0 || /[\s]/.test(text[i - 1])) {
+          const query = text.slice(i + 1, cursorPos);
+          return { start: i, query };
+        }
+        return null;
+      }
+      i--;
+    }
+    return null;
+  }
+
+  // Filtered files for the file menu
+  const filteredFiles = useMemo(() => {
+    const q = fileFilter.toLowerCase();
+    if (!q) return fileEntries;
+    return fileEntries.filter((f) =>
+      f.name.toLowerCase().includes(q) ||
+      f.path.toLowerCase().includes(q)
+    );
+  }, [fileEntries, fileFilter]);
+
+  // Scroll active file item into view when index changes
+  useEffect(() => {
+    if (!fileMenuOpen) return;
+    const el = fileItemRefs.current[fileIndex];
+    if (el) el.scrollIntoView({ block: "center" });
+  }, [fileIndex, fileMenuOpen]);
+
+  // Reset refs array when filtered list changes
+  useEffect(() => {
+    fileItemRefs.current = [];
+  }, [filteredFiles]);
+
+  // Clear file cache when cwd changes
+  useEffect(() => {
+    fileCacheRef.current = null;
+  }, [state.cwd]);
+
+  // Select a file and replace the @token in the textarea
+  function selectFile(file: FileEntry) {
+    const el = textareaRef.current;
+    if (!el) return;
+    const cursorPos = el.selectionStart ?? draft.length;
+    const token = findAtToken(draft, cursorPos);
+    if (!token) return;
+    const before = draft.slice(0, token.start);
+    const after = draft.slice(cursorPos);
+    const inserted = `@${file.path} `;
+    const newText = before + inserted + after;
+    const newCursor = before.length + inserted.length;
+    setDraft(newText);
+    setFileMenuOpen(false);
+    setTimeout(() => {
+      el.focus();
+      el.setSelectionRange(newCursor, newCursor);
+    }, 0);
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -864,6 +950,25 @@ function App() {
       </section>
 
       <footer className="composer">
+        {fileMenuOpen && filteredFiles.length > 0 && (
+          <div ref={fileMenuRef} className="file-menu" onMouseDown={(event) => event.preventDefault()}>
+            {filteredFiles.map((file, index) => (
+              <div
+                key={file.path}
+                ref={(el) => { fileItemRefs.current[index] = el; }}
+                role="option"
+                aria-selected={index === fileIndex}
+                className={`file-item${index === fileIndex ? " active" : ""}`}
+                onClick={() => selectFile(file)}
+                onMouseEnter={() => setFileIndex(index)}
+              >
+                <span className="file-icon">{file.isDirectory ? <Folder size={14} /> : <File size={14} />}</span>
+                <span className="file-name">{file.name}</span>
+                <span className="file-path">{file.path}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {commandMenuOpen && filteredCommands.length > 0 && (
           <div ref={commandMenuRef} className="command-menu" onMouseDown={(event) => event.preventDefault()}>
             {filteredCommands.map((cmd, index) => (
@@ -891,6 +996,34 @@ function App() {
           onChange={(event) => {
             const val = event.target.value;
             setDraft(val);
+            const cursorPos = event.target.selectionStart ?? val.length;
+
+            // Check for @ token first
+            const atToken = findAtToken(val, cursorPos);
+            if (atToken) {
+              // Open file menu, close command menu
+              setCommandMenuOpen(false);
+              setFileMenuOpen(true);
+              setFileFilter(atToken.query);
+              setFileIndex(0);
+              // Lazy-load file entries from API
+              if (!fileCacheRef.current) {
+                fetch("/api/files")
+                  .then((r) => r.json())
+                  .then((data) => {
+                    fileCacheRef.current = data.files ?? [];
+                    setFileEntries(data.files ?? []);
+                  })
+                  .catch(() => {});
+              } else {
+                setFileEntries(fileCacheRef.current);
+              }
+              return;
+            }
+
+            // Close file menu if no @ token
+            setFileMenuOpen(false);
+
             // Toggle command menu when user types / at line start
             if (val.startsWith("/") && !val.includes(" ") && val.length >= 1) {
               setCommandMenuOpen(true);
@@ -947,12 +1080,42 @@ function App() {
               // Any other key: let it through to onChange which will update commandFilter
               return;
             }
+            if (fileMenuOpen && filteredFiles.length > 0) {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setFileMenuOpen(false);
+                return;
+              }
+              if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setFileIndex((prev) => Math.max(0, prev - 1));
+                return;
+              }
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setFileIndex((prev) => Math.min(filteredFiles.length - 1, prev + 1));
+                return;
+              }
+              if (event.key === "Enter" && !event.shiftKey && !composingRef.current) {
+                event.preventDefault();
+                const file = filteredFiles[fileIndex];
+                if (file) selectFile(file);
+                return;
+              }
+              if (event.key === "Tab") {
+                event.preventDefault();
+                const file = filteredFiles[fileIndex];
+                if (file) selectFile(file);
+                return;
+              }
+              return;
+            }
             if (event.key === "Enter" && !event.shiftKey && !composingRef.current) {
               event.preventDefault();
               void sendPrompt();
             }
           }}
-          placeholder="Send a prompt to Pi — type / for commands"
+          placeholder="Send a prompt to Pi — / for commands, @ for files"
           disabled={!state.processRunning}
         />
         {state.isStreaming ? (

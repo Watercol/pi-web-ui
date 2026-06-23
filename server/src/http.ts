@@ -180,6 +180,32 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, rp
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/files") {
+    const cwd = rpc.getState().cwd;
+    if (!cwd) {
+      sendJson(res, 200, { files: [] });
+      return;
+    }
+    try {
+      const entries = await fs.readdir(cwd, { withFileTypes: true });
+      const files = entries
+        .filter((e) => !e.name.startsWith(".") && e.name !== "node_modules" && e.name !== "dist")
+        .map((e) => ({
+          name: e.name,
+          path: path.relative(cwd, path.join(cwd, e.name)),
+          isDirectory: e.isDirectory(),
+        }))
+        .sort((a, b) => {
+          if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+      sendJson(res, 200, { files });
+    } catch {
+      sendJson(res, 200, { files: [] });
+    }
+    return;
+  }
+
   sendJson(res, 404, { error: "Not found" });
 }
 

@@ -1634,6 +1634,78 @@ textarea {
   flex-shrink: 0;
 }
 
+/* =====================================================================
+   File menu (@ file picker)
+   ===================================================================== */
+
+.file-menu {
+  position: absolute;
+  bottom: 100%;
+  left: 20px;
+  right: 20px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin-bottom: 10px;
+  z-index: 100;
+  background: var(--bg-page);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(23, 32, 42, 0.08);
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+  transition: background 80ms ease;
+}
+
+.file-item:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.file-item.active {
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.file-item.active .file-name,
+.file-item.active .file-path,
+.file-item.active .file-icon {
+  color: inherit;
+}
+
+.file-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  color: var(--text-secondary);
+}
+
+.file-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 100px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  flex-shrink: 0;
+}
+
+.file-path {
+  color: var(--text-secondary);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
 @media (max-width: 860px) {
   .topbar {
     grid-template-columns: 1fr;
@@ -1652,6 +1724,12 @@ textarea {
   }
 
   .command-menu {
+    left: 10px;
+    right: 10px;
+    max-height: 220px;
+  }
+
+  .file-menu {
     left: 10px;
     right: 10px;
     max-height: 220px;
