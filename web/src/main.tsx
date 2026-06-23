@@ -952,21 +952,26 @@ function App() {
       <footer className="composer">
         {fileMenuOpen && filteredFiles.length > 0 && (
           <div ref={fileMenuRef} className="file-menu" onMouseDown={(event) => event.preventDefault()}>
-            {filteredFiles.map((file, index) => (
-              <div
-                key={file.path}
-                ref={(el) => { fileItemRefs.current[index] = el; }}
-                role="option"
-                aria-selected={index === fileIndex}
-                className={`file-item${index === fileIndex ? " active" : ""}`}
-                onClick={() => selectFile(file)}
-                onMouseEnter={() => setFileIndex(index)}
-              >
-                <span className="file-icon">{file.isDirectory ? <Folder size={14} /> : <File size={14} />}</span>
-                <span className="file-name">{file.name}</span>
-                <span className="file-path">{file.path}</span>
-              </div>
-            ))}
+            <div className="file-menu-list">
+              {filteredFiles.map((file, index) => (
+                <div
+                  key={file.path}
+                  ref={(el) => { fileItemRefs.current[index] = el; }}
+                  role="option"
+                  aria-selected={index === fileIndex}
+                  className={`file-item${index === fileIndex ? " active" : ""}`}
+                  onClick={() => selectFile(file)}
+                  onMouseEnter={() => setFileIndex(index)}
+                >
+                  <span className="file-icon">{file.isDirectory ? <Folder size={14} /> : <File size={14} />}</span>
+                  <span className="file-name">{file.name}</span>
+                  <span className="file-path">{file.path}</span>
+                </div>
+              ))}
+            </div>
+            <div className="file-menu-footer">
+              ({fileIndex + 1}/{filteredFiles.length})
+            </div>
           </div>
         )}
         {commandMenuOpen && filteredCommands.length > 0 && (

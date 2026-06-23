@@ -9,6 +9,8 @@ import { listSessions } from "./sessions.js";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const validThinkingLevels = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const MAX_FILE_DEPTH = 10;
+const IGNORE_DIRS = new Set(["node_modules", "dist", ".git", ".vite", ".next", "__pycache__", ".venv", "venv", ".env"]);
 const mimeTypes: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -187,18 +189,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, rp
       return;
     }
     try {
-      const entries = await fs.readdir(cwd, { withFileTypes: true });
-      const files = entries
-        .filter((e) => !e.name.startsWith(".") && e.name !== "node_modules" && e.name !== "dist")
-        .map((e) => ({
-          name: e.name,
-          path: path.relative(cwd, path.join(cwd, e.name)),
-          isDirectory: e.isDirectory(),
-        }))
-        .sort((a, b) => {
-          if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
-          return a.name.localeCompare(b.name);
-        });
+      const files = await walkDir(cwd, cwd, 0);
+      files.sort((a, b) => {
+        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
       sendJson(res, 200, { files });
     } catch {
       sendJson(res, 200, { files: [] });
@@ -207,6 +202,29 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, rp
   }
 
   sendJson(res, 404, { error: "Not found" });
+}
+
+async function walkDir(dir: string, baseDir: string, depth: number): Promise<{ name: string; path: string; isDirectory: boolean }[]> {
+  if (depth > MAX_FILE_DEPTH) return [];
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const results: { name: string; path: string; isDirectory: boolean }[] = [];
+
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    // Skip hidden files/dirs and ignored directories
+    if (entry.name.startsWith(".")) continue;
+    if (entry.isDirectory() && IGNORE_DIRS.has(entry.name)) continue;
+
+    const relativePath = path.relative(baseDir, fullPath);
+    if (entry.isDirectory()) {
+      results.push({ name: entry.name, path: relativePath, isDirectory: true });
+      const subEntries = await walkDir(fullPath, baseDir, depth + 1);
+      results.push(...subEntries);
+    } else {
+      results.push({ name: entry.name, path: relativePath, isDirectory: false });
+    }
+  }
+  return results;
 }
 
 async function serveStatic(res: ServerResponse, pathname: string, devAssets: boolean): Promise<void> {

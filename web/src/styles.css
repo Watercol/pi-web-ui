@@ -1643,14 +1643,29 @@ textarea {
   bottom: 100%;
   left: 20px;
   right: 20px;
-  max-height: 320px;
-  overflow-y: auto;
+  max-height: 380px;
+  display: flex;
+  flex-direction: column;
   margin-bottom: 10px;
   z-index: 100;
   background: var(--bg-page);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(23, 32, 42, 0.08);
+}
+
+.file-menu-list {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.file-menu-footer {
+  padding: 6px 8px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  border-top: 1px solid var(--border-color);
 }
 
 .file-item {
@@ -1690,7 +1705,7 @@ textarea {
 .file-name {
   font-weight: 600;
   color: var(--text-primary);
-  min-width: 100px;
+  min-width: 120px;
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   flex-shrink: 0;
