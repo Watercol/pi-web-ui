@@ -1,5 +1,7 @@
 # Pi Web UI
 
+[![GitHub](https://img.shields.io/badge/GitHub-Watercol/pi--web--ui-181717?logo=github)](https://github.com/Watercol/pi-web-ui)
+
 A web-based terminal UI for the [pi](https://github.com/earendil-works/pi-coding-agent) coding agent. Connect to a running pi session through your browser.
 
 ![Pi Web UI screenshot](https://raw.githubusercontent.com/Watercol/pi-web-ui/main/docs/Pi_Web_UI_example_01.png)

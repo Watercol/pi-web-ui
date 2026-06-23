@@ -6,6 +6,7 @@ import { marked } from "marked";
 import "./styles.css";
 import { MAX_VISIBLE_MESSAGES, emptyState, resizeComposerTextarea, modelDisplayName, modelKey, thinkingLevelLabel, supportedThinkingLevels, sessionDisplayName, formatRelativeTime, formatArgSummary, extractText, extractContentBlocks, buildStreamingTrace, traceShapeKey, hasAssistantDisplayContent, collapseToolGroups, mergeMessages, messageKey, shouldDisplayActivity, summarizeContentBlocks, appendToolEvent, isUnknownDisplayEvent, stripAnsiDisplay, formatTokens, traceEntryStatusColor, traceOverallStatus } from "./lib/helpers.js";
 import { ToastProvider, useToast } from "./lib/toast.js";
+import { InteractiveDialogProvider, useInteractiveDialog } from "./lib/interactive-dialog.js";
 
 type TimelineItem =
   | { kind: "message"; message: AgentMessage }
@@ -33,6 +34,32 @@ type ExtensionStatus = {
 // ============================================================================
 // Constants
 // ============================================================================
+
+/** Built-in slash commands (mirrored from pi TUI BUILTIN_SLASH_COMMANDS) */
+const BUILTIN_COMMANDS: PiSlashCommand[] = [
+  { name: "model", description: "Select model", source: "builtin" },
+  { name: "scoped-models", description: "Enable/disable models for cycling", source: "builtin" },
+  { name: "export", description: "Export session as HTML", source: "builtin" },
+  { name: "import", description: "Import and resume a session from JSONL", source: "builtin" },
+  { name: "share", description: "Share session as GitHub gist", source: "builtin" },
+  { name: "copy", description: "Copy last assistant message to clipboard", source: "builtin" },
+  { name: "name", description: "Set session display name", source: "builtin" },
+  { name: "session", description: "Show session info and stats", source: "builtin" },
+  { name: "changelog", description: "Show changelog entries", source: "builtin" },
+  { name: "hotkeys", description: "Show all keyboard shortcuts", source: "builtin" },
+  { name: "fork", description: "Create a new fork from a previous user message", source: "builtin" },
+  { name: "clone", description: "Duplicate the current session", source: "builtin" },
+  { name: "tree", description: "Navigate session tree (switch branches)", source: "builtin" },
+  { name: "trust", description: "Save project trust decision", source: "builtin" },
+  { name: "login", description: "Configure provider authentication", source: "builtin" },
+  { name: "logout", description: "Remove provider authentication", source: "builtin" },
+  { name: "new", description: "Start a new session", source: "builtin" },
+  { name: "compact", description: "Manually compact the session context", source: "builtin" },
+  { name: "resume", description: "Resume a different session", source: "builtin" },
+  { name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes", source: "builtin" },
+  { name: "quit", description: "Quit pi", source: "builtin" },
+  { name: "settings", description: "Open settings menu", source: "builtin" },
+];
 
 // ============================================================================
 // Markdown renderer
@@ -112,6 +139,7 @@ function App() {
   const [fileEntries, setFileEntries] = useState<FileEntry[]>([]);
 
   const { pushToast } = useToast();
+  const { pushDialog } = useInteractiveDialog();
 
   const updateExtensionStatus = (event: Extract<ActivityEvent, { type: "extension_ui_request" }>) => {
     const rawText = event.statusText || event.message || event.text || event.title || event.statusKey || "Extension UI update";
@@ -137,11 +165,18 @@ function App() {
     });
   };
 
-  // Route an activity event to either extension status bar or toast stack
+  // Route an activity event to either extension status bar, interactive dialog, or toast stack
   const pushActivity = (event: ActivityEvent) => {
-    if (event.type === "extension_ui_request" && event.method === "setStatus") {
-      updateExtensionStatus(event);
-      return;
+    if (event.type === "extension_ui_request") {
+      if (event.method === "setStatus") {
+        updateExtensionStatus(event);
+        return;
+      }
+      // Interactive extension_ui_request events (with options or widget content) go to dialog
+      if (event.options || event.widgetKey) {
+        pushDialog(event);
+        return;
+      }
     }
     // All other activity events go to the toast stack
     const dismissGroups: string[] | undefined =
@@ -543,7 +578,14 @@ function App() {
     try {
       const response = await fetch("/api/commands");
       const body = (await response.json()) as { commands?: PiSlashCommand[] };
-      if (Array.isArray(body.commands)) setSlashCommands(body.commands);
+      const rpcCommands = Array.isArray(body.commands) ? body.commands : [];
+      // Merge built-in commands with RPC commands, deduplicating by name
+      const merged = new Map<string, PiSlashCommand>();
+      for (const cmd of BUILTIN_COMMANDS) merged.set(cmd.name, cmd);
+      for (const cmd of rpcCommands) {
+        if (!merged.has(cmd.name)) merged.set(cmd.name, cmd);
+      }
+      setSlashCommands([...merged.values()].sort((a, b) => a.name.localeCompare(b.name)));
     } catch { /* silently ignore — command bar works without server data */ }
   }
 
@@ -700,6 +742,16 @@ function App() {
   async function sendPrompt() {
     const message = draft.trim();
     if (!message || state.isStreaming) return;
+
+    // Check if this is a slash command and handle built-in commands specially
+    if (message.startsWith("/")) {
+      const handled = await handleSlashCommand(message);
+      if (handled) {
+        setDraft("");
+        return;
+      }
+    }
+
     setDraft("");
     setError(undefined);
     setMessages((prev) => [...prev, { id: `local-user-${Date.now()}`, role: "user", content: message, timestamp: Date.now(), localOnly: true }]);
@@ -712,6 +764,250 @@ function App() {
     if (!response.ok) {
       const body = (await response.json().catch(() => ({}))) as { error?: string };
       setError(body.error || `Prompt failed with HTTP ${response.status}`);
+    }
+  }
+
+  /** Handle built-in slash commands by routing to appropriate RPC endpoints */
+  async function handleSlashCommand(command: string): Promise<boolean> {
+    const spaceIndex = command.indexOf(" ");
+    const cmdName = spaceIndex === -1 ? command.slice(1) : command.slice(1, spaceIndex);
+    const args = spaceIndex === -1 ? "" : command.slice(spaceIndex + 1).trim();
+
+    switch (cmdName) {
+      case "model":
+        // Open model selector menu
+        await toggleModelMenu();
+        return true;
+
+      case "scoped-models":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: "Scoped models management not yet supported in WebUI" } } as ActivityEvent
+        });
+        return true;
+
+      case "export":
+        try {
+          const response = await fetch("/api/export", { method: "POST" });
+          const body = (await response.json()) as { data?: { filePath?: string }; error?: string };
+          if (body.data?.filePath) {
+            pushToast({
+              id: `export-${Date.now()}`,
+              type: "unknown",
+              payload: { type: "unknown", timestamp: Date.now(), event: { type: "success", message: `Exported to ${body.data.filePath}` } } as ActivityEvent
+            });
+          } else if (body.error) {
+            setError(body.error);
+          }
+        } catch (error) {
+          setError(error instanceof Error ? error.message : String(error));
+        }
+        return true;
+
+      case "import":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: "Import via file upload not yet supported. Use session menu instead." } } as ActivityEvent
+        });
+        return true;
+
+      case "share":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: "GitHub gist sharing not yet supported in WebUI" } } as ActivityEvent
+        });
+        return true;
+
+      case "copy":
+        try {
+          const response = await fetch("/api/copy");
+          const body = (await response.json()) as { data?: { text?: string }; error?: string };
+          if (body.data?.text) {
+            await navigator.clipboard.writeText(body.data.text);
+            pushToast({
+              id: `copy-${Date.now()}`,
+              type: "unknown",
+              payload: { type: "unknown", timestamp: Date.now(), event: { type: "success", message: "Copied last assistant message" } } as ActivityEvent
+            });
+          } else if (body.error) {
+            setError(body.error);
+          }
+        } catch (error) {
+          setError(error instanceof Error ? error.message : String(error));
+        }
+        return true;
+
+      case "name":
+        if (!args) {
+          setError("Usage: /name <session-name>");
+          return true;
+        }
+        try {
+          const response = await fetch("/api/session/name", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: args })
+          });
+          const body = (await response.json()) as { error?: string };
+          if (body.error) {
+            setError(body.error);
+          } else {
+            await fetchState();
+            pushToast({
+              id: `name-${Date.now()}`,
+              type: "unknown",
+              payload: { type: "unknown", timestamp: Date.now(), event: { type: "success", message: `Session renamed to "${args}"` } } as ActivityEvent
+            });
+          }
+        } catch (error) {
+          setError(error instanceof Error ? error.message : String(error));
+        }
+        return true;
+
+      case "session":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: `Session: ${state.sessionName || state.sessionId || "new"}, Messages: ${messages.length}` } } as ActivityEvent
+        });
+        return true;
+
+      case "changelog":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: "Changelog view not yet supported in WebUI" } } as ActivityEvent
+        });
+        return true;
+
+      case "hotkeys":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: "Keyboard shortcuts: Enter=send, Shift+Enter=newline, Esc=abort, /=commands, @=files" } } as ActivityEvent
+        });
+        return true;
+
+      case "fork":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: "Fork from previous message not yet supported in WebUI" } } as ActivityEvent
+        });
+        return true;
+
+      case "clone":
+        try {
+          const response = await fetch("/api/session/clone", { method: "POST" });
+          const body = (await response.json()) as { error?: string };
+          if (body.error) {
+            setError(body.error);
+          } else {
+            await Promise.all([fetchState(), fetchMessages()]);
+            void fetchSessions();
+            pushToast({
+              id: `clone-${Date.now()}`,
+              type: "unknown",
+              payload: { type: "unknown", timestamp: Date.now(), event: { type: "success", message: "Session cloned" } } as ActivityEvent
+            });
+          }
+        } catch (error) {
+          setError(error instanceof Error ? error.message : String(error));
+        }
+        return true;
+
+      case "tree":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: "Session tree navigation not yet supported in WebUI" } } as ActivityEvent
+        });
+        return true;
+
+      case "trust":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: "Project trust management not yet supported in WebUI" } } as ActivityEvent
+        });
+        return true;
+
+      case "login":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: "OAuth login must be configured via pi CLI first" } } as ActivityEvent
+        });
+        return true;
+
+      case "logout":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: "OAuth logout must be done via pi CLI" } } as ActivityEvent
+        });
+        return true;
+
+      case "new":
+        await newSession();
+        return true;
+
+      case "compact":
+        try {
+          const response = await fetch("/api/compact", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(args ? { customInstructions: args } : {})
+          });
+          const body = (await response.json()) as { error?: string };
+          if (body.error) {
+            setError(body.error);
+          } else {
+            pushToast({
+              id: `compact-${Date.now()}`,
+              type: "unknown",
+              payload: { type: "unknown", timestamp: Date.now(), event: { type: "success", message: "Compaction started" } } as ActivityEvent
+            });
+          }
+        } catch (error) {
+          setError(error instanceof Error ? error.message : String(error));
+        }
+        return true;
+
+      case "resume":
+        await toggleSessionMenu();
+        return true;
+
+      case "reload":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: "Reload not supported in RPC mode — restart pi-web-ui instead" } } as ActivityEvent
+        });
+        return true;
+
+      case "quit":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: "Close the browser tab to quit" } } as ActivityEvent
+        });
+        return true;
+
+      case "settings":
+        pushToast({
+          id: `info-${Date.now()}`,
+          type: "unknown",
+          payload: { type: "unknown", timestamp: Date.now(), event: { type: "info", message: "Settings panel not yet implemented in WebUI" } } as ActivityEvent
+        });
+        return true;
+
+      default:
+        // Not a built-in command — let it fall through to normal prompt handling
+        return false;
     }
   }
 
@@ -741,13 +1037,21 @@ function App() {
   const commandItemRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   // Filtered slash commands for the command menu
+  // Sort by source (builtin first) then by name to match visual grouping
   const filteredCommands = useMemo(() => {
     const q = commandFilter.toLowerCase();
-    if (!q) return slashCommands;
-    return slashCommands.filter((cmd) =>
-      cmd.name.toLowerCase().includes(q) ||
-      (cmd.description || "").toLowerCase().includes(q)
-    );
+    const sourceOrder: Record<string, number> = { builtin: 0, extension: 1, prompt: 2, skill: 3 };
+    const filtered = q
+      ? slashCommands.filter((cmd) =>
+          cmd.name.toLowerCase().includes(q) ||
+          (cmd.description || "").toLowerCase().includes(q)
+        )
+      : slashCommands;
+    return [...filtered].sort((a, b) => {
+      const sourceDiff = (sourceOrder[a.source] ?? 99) - (sourceOrder[b.source] ?? 99);
+      if (sourceDiff !== 0) return sourceDiff;
+      return a.name.localeCompare(b.name);
+    });
   }, [slashCommands, commandFilter]);
 
   // Scroll active command item into view when index changes
@@ -976,23 +1280,45 @@ function App() {
         )}
         {commandMenuOpen && filteredCommands.length > 0 && (
           <div ref={commandMenuRef} className="command-menu" onMouseDown={(event) => event.preventDefault()}>
-            {filteredCommands.map((cmd, index) => (
-              <div
-                key={cmd.name}
-                ref={(el) => { commandItemRefs.current[index] = el; }}
-                role="option"
-                aria-selected={index === commandIndex}
-                className={`command-item${index === commandIndex ? " active" : ""}`}
-                onClick={() => selectCommand(cmd)}
-                onMouseEnter={() => setCommandIndex(index)}
-              >
-                <span className="command-name">/{cmd.name}</span>
-                {cmd.description && <span className="command-desc">{cmd.description}</span>}
-                {cmd.source !== "builtin" && (
-                  <span className="command-source">{cmd.source}</span>
-                )}
-              </div>
-            ))}
+            {(() => {
+              // Group commands by source
+              const groups: { source: string; commands: PiSlashCommand[] }[] = [];
+              const sourceOrder = ["builtin", "extension", "prompt", "skill"];
+              
+              for (const source of sourceOrder) {
+                const cmds = filteredCommands.filter((cmd) => cmd.source === source);
+                if (cmds.length > 0) {
+                  groups.push({ source, commands: cmds });
+                }
+              }
+              
+              let currentIndex = 0;
+              return groups.map((group) => (
+                <div key={group.source} className="command-group" data-source={group.source}>
+                  <div className="command-group-header">
+                    <span className="command-group-label">{group.source}</span>
+                    <span className="command-group-count">{group.commands.length}</span>
+                  </div>
+                  {group.commands.map((cmd) => {
+                    const index = currentIndex++;
+                    return (
+                      <div
+                        key={cmd.name}
+                        ref={(el) => { commandItemRefs.current[index] = el; }}
+                        role="option"
+                        aria-selected={index === commandIndex}
+                        className={`command-item${index === commandIndex ? " active" : ""}`}
+                        onClick={() => selectCommand(cmd)}
+                        onMouseEnter={() => setCommandIndex(index)}
+                      >
+                        <span className="command-name">/{cmd.name}</span>
+                        {cmd.description && <span className="command-desc">{cmd.description}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              ));
+            })()}
           </div>
         )}
         <textarea
@@ -2120,9 +2446,11 @@ const rootEl = typeof document !== "undefined" ? document.getElementById("root")
 if (rootEl) {
   createRoot(rootEl).render(
     <React.StrictMode>
-      <ToastProvider>
-        <App />
-      </ToastProvider>
+      <InteractiveDialogProvider>
+        <ToastProvider>
+          <App />
+        </ToastProvider>
+      </InteractiveDialogProvider>
     </React.StrictMode>
   );
 }

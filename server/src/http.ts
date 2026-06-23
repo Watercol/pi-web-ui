@@ -7,6 +7,11 @@ import type { ServerConfig } from "./config.js";
 import { PiRpcClient as PiRpcClientClass, type PiRpcClient } from "./pi-rpc-client.js";
 import { listSessions } from "./sessions.js";
 
+type ExtensionUiResponseRequest = {
+  eventId: string;
+  response: string;
+};
+
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const validThinkingLevels = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 const MAX_FILE_DEPTH = 10;
@@ -198,6 +203,68 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, rp
     } catch {
       sendJson(res, 200, { files: [] });
     }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/extension-response") {
+    const body = (await readJson(req)) as ExtensionUiResponseRequest;
+    const eventId = typeof body.eventId === "string" ? body.eventId.trim() : "";
+    const response = typeof body.response === "string" ? body.response : "";
+    if (!eventId) {
+      sendJson(res, 400, { error: "eventId is required" });
+      return;
+    }
+    sendJson(res, 200, await rpc.respondToExtensionUi(eventId, response));
+    return;
+  }
+
+  // --- Built-in command endpoints ---
+
+  if (req.method === "POST" && url.pathname === "/api/compact") {
+    const body = (await readJson(req)) as { customInstructions?: string };
+    sendJson(res, 200, await rpc.compact(body.customInstructions));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/export") {
+    sendJson(res, 200, await rpc.exportHtml());
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/copy") {
+    sendJson(res, 200, await rpc.getLastAssistantText());
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/session/name") {
+    const body = (await readJson(req)) as { name: string };
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name) {
+      sendJson(res, 400, { error: "Session name is required" });
+      return;
+    }
+    sendJson(res, 200, await rpc.setSessionName(name));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/session/clone") {
+    sendJson(res, 200, await rpc.clone());
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/fork/messages") {
+    sendJson(res, 200, await rpc.getForkMessages());
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/fork") {
+    const body = (await readJson(req)) as { entryId: string };
+    const entryId = typeof body.entryId === "string" ? body.entryId.trim() : "";
+    if (!entryId) {
+      sendJson(res, 400, { error: "Entry ID is required" });
+      return;
+    }
+    sendJson(res, 200, await rpc.fork(entryId));
     return;
   }
 

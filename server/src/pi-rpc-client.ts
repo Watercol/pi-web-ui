@@ -253,6 +253,10 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
     return this.request("get_commands");
   }
 
+  async respondToExtensionUi(eventId: string, response: string): Promise<PiRpcResponse> {
+    return this.request("extension_ui_response", { eventId, response });
+  }
+
   async setThinkingLevel(level: string): Promise<PiRpcResponse> {
     const response = await this.request("set_thinking_level", { level });
     if (response.success) {
@@ -263,6 +267,34 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
       void this.refreshState().catch(() => undefined);
     }
     return response;
+  }
+
+  async compact(customInstructions?: string): Promise<PiRpcResponse> {
+    return this.request("compact", customInstructions ? { customInstructions } : {});
+  }
+
+  async exportHtml(): Promise<PiRpcResponse> {
+    return this.request("export_html");
+  }
+
+  async getLastAssistantText(): Promise<PiRpcResponse> {
+    return this.request("get_last_assistant_text");
+  }
+
+  async setSessionName(name: string): Promise<PiRpcResponse> {
+    return this.request("set_session_name", { name });
+  }
+
+  async clone(): Promise<PiRpcResponse> {
+    return this.request("clone");
+  }
+
+  async getForkMessages(): Promise<PiRpcResponse> {
+    return this.request("get_fork_messages");
+  }
+
+  async fork(entryId: string): Promise<PiRpcResponse> {
+    return this.request("fork", { entryId });
   }
 
   async newSession(): Promise<PiRpcResponse> {
