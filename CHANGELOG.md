@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.0 — 2026-06-23
+
+### Added
+- Slash command menu: `/api/commands` endpoint retrieves commands registered
+  on Pi; front-end command palette groups commands by source (builtin/extension/prompt/skill)
+  with inline execution
+- Git branch display: `server/src/git-branch.ts` reads the current git branch
+  and shows it in the topbar alongside the working directory
+- File picker for `@` references: `/api/files` endpoint recursively walks the
+  project tree (depth limit 10, ignores `.git`/`node_modules` etc.); front-end
+  shows a dropdown when `@` is typed in the input box
+- Interactive dialog system (`interactive-dialog.tsx`): modal overlay for
+  `extension_ui_request` events with options list, keyboard navigation, widget
+  text display, and required/optional dismiss semantics
+- Built-in command API endpoints: `/api/compact`, `/api/export`, `/api/copy`,
+  `/api/session/name`, `/api/session/clone`, `/api/fork/messages`, `/api/fork`
+- New shared types: `PiSlashCommand`, `FileEntry`; `gitBranch` field on `PiState`
+
+### Fixed
+- `@` file path directive: fixed recursive directory traversal so nested files
+  are properly discovered and displayed
+
+### Changed
+- Input box now supports `@` to pick files and `/` to invoke command palette
+- Extension UI response flow now uses a proper modal dialog instead of inline
+  bubbles, with keyboard navigation and confirmation buttons
+
 ## 0.2.2 — 2026-06-20
 
 ### Added
