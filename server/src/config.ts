@@ -36,6 +36,7 @@ export function parseArgs(argv: string[], env = process.env): ServerConfig {
     else if (arg === "--provider") config.provider = next();
     else if (arg === "--model") config.model = next();
     else if (arg === "--prod-assets") config.devAssets = false;
+    else if (arg === "--dev-watch") { /* handled by index.ts to start vite watch */ }
     else if (arg === "--help" || arg === "-h") {
       throw new Error(helpText());
     } else {
