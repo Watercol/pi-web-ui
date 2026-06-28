@@ -1939,7 +1939,7 @@ function SubNode({ entry }: { entry: TraceEntry }) {
             {expanded ? <ChevronDown size={12} className="sub-node-chevron open" /> : <ChevronRight size={12} className="sub-node-chevron" />}
           </span>
           <span className="sub-node-label">Thinking</span>
-          <span className="sub-node-summary">{preview}</span>
+          {!expanded && <span className="sub-node-summary">{preview}</span>}
         </button>
         {expanded && (
           <div className="sub-node-detail">
