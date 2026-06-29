@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.1 — 2026-06-29
+
+### Added
+- Dev mode file watcher: `--dev-watch` flag starts `vite build --watch` in the
+  background so web asset changes are picked up automatically during development
+
+### Changed
+- Sub-node expand component: improved display logic and styling for expanded
+  tool/thinking details
+- Tool result details: removed collapsible toggle and improved argument parsing
+  for a cleaner display
+- Sub-node detail styles updated for better visual consistency
+
+### Fixed
+- Trace component performance: optimized rendering and animation to reduce
+  stutter during rapid trace updates
+
 ## 0.3.0 — 2026-06-23
 
 ### Added
