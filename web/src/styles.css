@@ -48,6 +48,21 @@
   --color-accent:       #1f6aa5;
   --color-accent-ring:  #d7e9f8;
 
+  /* Animation timing */
+  --anim-fast: 120ms;
+  --anim-normal: 200ms;
+  --anim-slow: 300ms;
+
+  /* Easing functions */
+  --ease-standard: cubic-bezier(0.4, 0.0, 0.2, 1);
+  --ease-decelerate: cubic-bezier(0.0, 0.0, 0.2, 1);
+
+  /* Status colors (semantic) */
+  --color-status-active: #c0a53e;   /* pending/running */
+  --color-status-complete: #4caf93; /* complete/ok */
+  --color-status-error: #e0554a;    /* error */
+  --color-status-thinking: #7b8a9e; /* thinking/muted */
+
   /* Apply base */
   font-family: var(--font-sans);
   background: var(--bg-page);
@@ -129,6 +144,8 @@ textarea {
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-muted);
+  transition: background var(--anim-normal) var(--ease-standard),
+              border-color var(--anim-normal) var(--ease-standard);
 }
 
 .status > span {
@@ -441,6 +458,7 @@ textarea {
   gap: 4px;
   overscroll-behavior: contain;
   scroll-behavior: auto;
+  overflow-anchor: auto;
 }
 
 .empty-state {
@@ -809,6 +827,7 @@ textarea {
   background: var(--border-color);
   border: 2px solid var(--bg-page);
   z-index: 2;
+  transition: background var(--anim-normal) var(--ease-standard);
 }
 
 .path-dot.user       { background: #4f8ec7; }
@@ -836,6 +855,7 @@ textarea {
   /* Minimal: status is shown by the path dot; header has a subtle left accent */
   padding: 0;
   border-left: 3px solid transparent;
+  transition: border-left-color var(--anim-normal) var(--ease-standard);
 }
 
 .trace-card.active {
@@ -884,9 +904,22 @@ textarea {
    Sub-path (Layer 2: trace-internal timeline)
    ===================================================================== */
 
+/* Fade-slide-in animation for expandable content */
+@keyframes fade-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .sub-path {
   position: relative;
   padding: 0 14px 12px 24px;
+  animation: fade-slide-in var(--anim-normal) var(--ease-decelerate);
 }
 
 /* Dashed vertical line for sub-path */
@@ -920,6 +953,22 @@ textarea {
   background: var(--border-color);
   border: 1.5px solid #f8fafb;
   z-index: 2;
+  transition: background var(--anim-normal) var(--ease-standard),
+              box-shadow var(--anim-normal) var(--ease-standard);
+}
+
+.sub-dot::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: inherit;
+  transform: translate(-50%, -50%) scale(1);
+  opacity: 0;
+  z-index: -1;
 }
 
 .sub-dot.thinking  { background: #7b8a9e; }
@@ -928,14 +977,24 @@ textarea {
 .sub-dot.complete  { background: #4caf93; }
 .sub-dot.error     { background: #e0554a; }
 
-/* Pulse animation for running dots */
+/* Pulse animation for running dots (GPU-accelerated via transform+opacity) */
 @keyframes path-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(192, 165, 62, 0.5); }
-  50%      { box-shadow: 0 0 0 4px rgba(192, 165, 62, 0); }
+  0%, 100% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 0.5;
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(2);
+    opacity: 0;
+  }
+}
+
+.sub-dot.running::after {
+  animation: path-pulse 1.2s ease-in-out infinite;
 }
 
 .sub-dot.running {
-  animation: path-pulse 1.2s ease-in-out infinite;
+  will-change: transform, opacity;
 }
 
 /* Sub-node toggle (summary line) */
@@ -999,6 +1058,7 @@ textarea {
   margin-bottom: 4px;
   font-size: var(--fs-xs);
   padding-left: 20px;
+  animation: fade-slide-in var(--anim-normal) var(--ease-decelerate);
 }
 
 .sub-node-detail pre {
@@ -1031,6 +1091,7 @@ textarea {
 
 .sub-group-items {
   margin-top: 4px;
+  animation: fade-slide-in var(--anim-normal) var(--ease-decelerate);
 }
 
 /* Tool execution */
@@ -2037,4 +2098,14 @@ textarea {
   background: var(--bg-subtle);
   border-color: var(--border-hover);
   color: var(--text-primary);
+}
+
+/* Accessibility: reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

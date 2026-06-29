@@ -434,7 +434,9 @@ function App() {
   // Auto-scroll when messages or streaming content changes
   useEffect(() => {
     if (!shouldStickToBottomRef.current) return;
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+    requestAnimationFrame(() => {
+      listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+    });
   }, [messages, streamingMessage, toolEvents, isCompacting]);
 
   // Merge all event streams into a single chronological timeline
@@ -1864,7 +1866,7 @@ export function TraceCard({ trace, active, defaultExpanded }: { trace: Execution
 // Sub-path (Layer 2): trace-internal vertical timeline with dashed line
 // ============================================================================
 
-function SubPath({ entries }: { entries: TraceEntry[] }) {
+const SubPath = React.memo(function SubPath({ entries }: { entries: TraceEntry[] }) {
   // Merge consecutive completed (non-error) tools into groups
   const merged: Array<TraceEntry | { kind: "subGroup"; entries: Extract<TraceEntry, { kind: "tool" }>[]; key: string }> = [];
   let group: Extract<TraceEntry, { kind: "tool" }>[] = [];
@@ -1903,13 +1905,13 @@ function SubPath({ entries }: { entries: TraceEntry[] }) {
       })}
     </div>
   );
-}
+});
 
 // ============================================================================
 // Sub-node (Layer 2): individual thinking or tool entry
 // ============================================================================
 
-function SubNode({ entry }: { entry: TraceEntry }) {
+const SubNode = React.memo(function SubNode({ entry }: { entry: TraceEntry }) {
   const [expanded, setExpanded] = useState(() => {
     if (entry.kind === "tool") {
       const t = entry.event;
@@ -1979,13 +1981,13 @@ function SubNode({ entry }: { entry: TraceEntry }) {
       )}
     </div>
   );
-}
+});
 
 // ============================================================================
 // Sub-group (Layer 2): merged completed tools
 // ============================================================================
 
-function SubGroup({ entries }: { entries: Extract<TraceEntry, { kind: "tool" }>[] }) {
+const SubGroup = React.memo(function SubGroup({ entries }: { entries: Extract<TraceEntry, { kind: "tool" }>[] }) {
   const [expanded, setExpanded] = useState(false);
   const names = entries.map((e) => e.event.toolName).filter(Boolean).join(", ");
 
@@ -2007,7 +2009,7 @@ function SubGroup({ entries }: { entries: Extract<TraceEntry, { kind: "tool" }>[
       )}
     </div>
   );
-}
+});
 
 // ============================================================================
 // Streaming assistant card (trace + text in one card for live streaming)
@@ -2081,7 +2083,7 @@ function ToolGroupBubble({ events }: { events: { kind: "toolEvent"; event: ToolE
   );
 }
 
-function ToolExecutionBubble({ tool, collapsed }: { tool: ToolExecutionEvent; collapsed?: boolean }) {
+const ToolExecutionBubble = React.memo(function ToolExecutionBubble({ tool, collapsed }: { tool: ToolExecutionEvent; collapsed?: boolean }) {
   const ss = tool.status;
   const hasResult = !!(tool.result || tool.partialResult);
   const isPending = ss === "pending";
@@ -2117,7 +2119,7 @@ function ToolExecutionBubble({ tool, collapsed }: { tool: ToolExecutionEvent; co
       )}
     </article>
   );
-}
+});
 
 function ToolResultDetails({ blocks, isPartial }: { blocks: ContentBlock[]; isPartial?: boolean }) {
   return (

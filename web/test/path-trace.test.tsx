@@ -166,4 +166,39 @@ describe("TraceCard", () => {
     const subPath = container.querySelector(".sub-path");
     expect(subPath?.textContent).toContain("read");
   });
+
+  it("renders SubPath with fade-slide-in animation class when expanded", () => {
+    const trace: ExecutionTrace = {
+      id: "t1",
+      entries: [thinkingEntry("th1"), toolEntry("t1", { status: "complete" })]
+    };
+    const { container } = render(<TraceCard trace={trace} defaultExpanded />);
+    const subPath = container.querySelector(".sub-path");
+    expect(subPath).not.toBeNull();
+  });
+
+  it("renders sub-node-detail with correct alignment padding when tool expanded", () => {
+    const trace: ExecutionTrace = {
+      id: "t1",
+      entries: [toolEntry("t1", { status: "running", args: { path: "/foo" } })]
+    };
+    const { container } = render(<TraceCard trace={trace} defaultExpanded />);
+    const detail = container.querySelector(".sub-node-detail");
+    expect(detail).not.toBeNull();
+  });
+
+  it("groups completed tools into SubGroup with animation class", () => {
+    const trace: ExecutionTrace = {
+      id: "t1",
+      entries: [
+        toolEntry("t1", { status: "complete", result: { content: [] } }),
+        toolEntry("t2", { status: "complete", result: { content: [] } }),
+        toolEntry("t3", { status: "complete", result: { content: [] } })
+      ]
+    };
+    const { container } = render(<TraceCard trace={trace} defaultExpanded />);
+    const groupToggle = container.querySelector(".sub-group-toggle");
+    expect(groupToggle).not.toBeNull();
+    expect(groupToggle?.textContent).toContain("3 tools");
+  });
 });
