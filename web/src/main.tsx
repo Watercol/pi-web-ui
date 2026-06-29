@@ -2120,12 +2120,10 @@ function ToolExecutionBubble({ tool, collapsed }: { tool: ToolExecutionEvent; co
 }
 
 function ToolResultDetails({ blocks, isPartial }: { blocks: ContentBlock[]; isPartial?: boolean }) {
-  const text = summarizeContentBlocks(blocks);
   return (
-    <details className="tool-result">
-      <summary>{isPartial ? "Streaming output" : text || "Result details"}</summary>
+    <div className="tool-result">
       <ResultContent blocks={blocks} />
-    </details>
+    </div>
   );
 }
 

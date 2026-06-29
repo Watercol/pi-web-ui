@@ -1196,20 +1196,6 @@ textarea {
   margin-bottom: 0;
 }
 
-.tool-result summary {
-  font-size: var(--fs-xs);
-  color: var(--text-muted);
-  margin-bottom: 4px;
-  cursor: pointer;
-}
-
-.tool-result:not([open]) summary {
-  margin-bottom: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .tool-result pre,
 .tool-call-block pre,
 .message.activity.raw pre {

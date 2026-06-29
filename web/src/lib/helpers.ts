@@ -132,7 +132,9 @@ export function extractContentBlocks(message: AgentMessage): ContentBlock[] {
           return { type: "text", text: block.text } satisfies ContentBlock;
         }
         if (blockType === "toolCall" && typeof block.name === "string" && typeof block.id === "string") {
-          return { type: "toolCall", name: block.name, id: block.id, input: (block.input as JsonValue) ?? null } satisfies ContentBlock;
+          // Session 文件中参数存储在 arguments 字段，streaming 消息中在 input 字段
+          const args = (block.input as JsonValue) ?? (block.arguments as JsonValue) ?? null;
+          return { type: "toolCall", name: block.name, id: block.id, input: args, arguments: args } satisfies ContentBlock;
         }
         if (blockType === "image" && typeof block.data === "string" && typeof block.mimeType === "string") {
           return { type: "image", data: block.data, mimeType: block.mimeType } satisfies ContentBlock;
