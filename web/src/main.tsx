@@ -140,9 +140,11 @@ function App() {
   const [commandMenuOpen, setCommandMenuOpen] = useState(false);
   const [commandFilter, setCommandFilter] = useState("");
   const [commandIndex, setCommandIndex] = useState(0);
+  const [commandHoverIndex, setCommandHoverIndex] = useState<number | null>(null);
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [fileFilter, setFileFilter] = useState("");
   const [fileIndex, setFileIndex] = useState(0);
+  const [fileHoverIndex, setFileHoverIndex] = useState<number | null>(null);
   const [fileEntries, setFileEntries] = useState<FileEntry[]>([]);
 
   // --- File sidebar state ---
@@ -1523,17 +1525,17 @@ function App() {
 
       <footer className="composer">
         {fileMenuOpen && filteredFiles.length > 0 && (
-          <div ref={fileMenuRef} className="file-menu" onMouseDown={(event) => event.preventDefault()}>
+          <div ref={fileMenuRef} className="file-menu" onMouseDown={(event) => event.preventDefault()} onMouseLeave={() => setFileHoverIndex(null)}>
             <div className="file-menu-list">
               {filteredFiles.map((file, index) => (
                 <div
                   key={file.path}
                   ref={(el) => { fileItemRefs.current[index] = el; }}
                   role="option"
-                  aria-selected={index === fileIndex}
-                  className={`file-item${index === fileIndex ? " active" : ""}`}
+                  aria-selected={index === (fileHoverIndex ?? fileIndex)}
+                  className={`file-item${index === (fileHoverIndex ?? fileIndex) ? " active" : ""}`}
                   onClick={() => selectFile(file)}
-                  onMouseEnter={() => setFileIndex(index)}
+                  onMouseEnter={() => setFileHoverIndex(index)}
                 >
                   <span className="file-icon">{file.isDirectory ? <Folder size={14} /> : <File size={14} />}</span>
                   <span className="file-name">{file.name}</span>
@@ -1547,7 +1549,7 @@ function App() {
           </div>
         )}
         {commandMenuOpen && filteredCommands.length > 0 && (
-          <div ref={commandMenuRef} className="command-menu" onMouseDown={(event) => event.preventDefault()}>
+          <div ref={commandMenuRef} className="command-menu" onMouseDown={(event) => event.preventDefault()} onMouseLeave={() => setCommandHoverIndex(null)}>
             {(() => {
               // Group commands by source
               const groups: { source: string; commands: PiSlashCommand[] }[] = [];
@@ -1574,10 +1576,10 @@ function App() {
                         key={cmd.name}
                         ref={(el) => { commandItemRefs.current[index] = el; }}
                         role="option"
-                        aria-selected={index === commandIndex}
-                        className={`command-item${index === commandIndex ? " active" : ""}`}
+                        aria-selected={index === (commandHoverIndex ?? commandIndex)}
+                        className={`command-item${index === (commandHoverIndex ?? commandIndex) ? " active" : ""}`}
                         onClick={() => selectCommand(cmd)}
-                        onMouseEnter={() => setCommandIndex(index)}
+                        onMouseEnter={() => setCommandHoverIndex(index)}
                       >
                         <span className="command-name">/{cmd.name}</span>
                         {cmd.description && <span className="command-desc">{cmd.description}</span>}
@@ -1605,6 +1607,7 @@ function App() {
               setFileMenuOpen(true);
               setFileFilter(atToken.query);
               setFileIndex(0);
+              setFileHoverIndex(null);
               // Lazy-load file entries from API
               if (!fileCacheRef.current) {
                 fetch("/api/files")
@@ -1628,6 +1631,7 @@ function App() {
               setCommandMenuOpen(true);
               setCommandFilter(val.slice(1));
               setCommandIndex(0);
+              setCommandHoverIndex(null);
             } else if (val.startsWith("/") && val.includes(" ")) {
               setCommandMenuOpen(false);
             } else {
@@ -1645,17 +1649,19 @@ function App() {
               }
               if (event.key === "ArrowUp") {
                 event.preventDefault();
+                setCommandHoverIndex(null);
                 setCommandIndex((prev) => Math.max(0, prev - 1));
                 return;
               }
               if (event.key === "ArrowDown") {
                 event.preventDefault();
+                setCommandHoverIndex(null);
                 setCommandIndex((prev) => Math.min(filteredCommands.length - 1, prev + 1));
                 return;
               }
               if (event.key === "Enter" && !event.shiftKey && !composingRef.current) {
                 event.preventDefault();
-                const cmd = filteredCommands[commandIndex];
+                const cmd = filteredCommands[commandHoverIndex ?? commandIndex];
                 if (cmd) selectCommand(cmd);
                 return;
               }
@@ -1687,17 +1693,19 @@ function App() {
               }
               if (event.key === "ArrowUp") {
                 event.preventDefault();
+                setFileHoverIndex(null);
                 setFileIndex((prev) => Math.max(0, prev - 1));
                 return;
               }
               if (event.key === "ArrowDown") {
                 event.preventDefault();
+                setFileHoverIndex(null);
                 setFileIndex((prev) => Math.min(filteredFiles.length - 1, prev + 1));
                 return;
               }
               if (event.key === "Enter" && !event.shiftKey && !composingRef.current) {
                 event.preventDefault();
-                const file = filteredFiles[fileIndex];
+                const file = filteredFiles[fileHoverIndex ?? fileIndex];
                 if (file) selectFile(file);
                 return;
               }
