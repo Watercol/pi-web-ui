@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0 — 2026-06-30
+
+### Added
+- File sidebar: right-side panel showing workspace files with directory-first
+  alphabetical sorting, directory expand/collapse, and file tree structure
+- File preview: click any file to preview its content; supports text files,
+  images (png/jpg/gif/webp/svg), and markdown rendering
+- Draggable separator: resizable sidebar (200px–800px) with visual hover
+  feedback and linear drag response
+- Sidebar collapse/expand: toggle button to hide/show the sidebar while
+  preserving the separator for quick re-expand
+- Refresh button to reload the file list on demand
+- New backend endpoints: `/api/file-content` and `/api/file-raw` with path
+  validation ensuring workspace-scoped access
+
+### Changed
+- Sidebar collapse and refresh interactions polished for smoother UX
+
 ## 0.3.1 — 2026-06-29
 
 ### Added
