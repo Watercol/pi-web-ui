@@ -31,6 +31,13 @@ type ExtensionStatus = {
   timestamp: number;
 };
 
+interface FileTreeNode {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  children: FileTreeNode[];
+}
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -138,6 +145,14 @@ function App() {
   const [fileIndex, setFileIndex] = useState(0);
   const [fileEntries, setFileEntries] = useState<FileEntry[]>([]);
 
+  // --- File sidebar state ---
+  const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [selectedFile, setSelectedFile] = useState<FileEntry | null>(null);
+  const [previewContent, setPreviewContent] = useState<string>("");
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(320);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+
   const { pushToast } = useToast();
   const { pushDialog } = useInteractiveDialog();
 
@@ -194,6 +209,7 @@ function App() {
     void fetchState();
     void fetchMessages();
     void fetchCommands();
+    void fetchFileList();
 
     const source = new EventSource("/api/events");
     source.onopen = () => {
@@ -590,6 +606,134 @@ function App() {
       setSlashCommands([...merged.values()].sort((a, b) => a.name.localeCompare(b.name)));
     } catch { /* silently ignore — command bar works without server data */ }
   }
+
+  // --- File sidebar functions ---
+  const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp', '.ico']);
+  const MARKDOWN_EXTENSIONS = new Set(['.md', '.mdx', '.markdown']);
+
+  function getFileExtension(filename: string): string {
+    const lastDot = filename.lastIndexOf('.');
+    return lastDot >= 0 ? filename.slice(lastDot).toLowerCase() : '';
+  }
+
+  function isImageFile(filename: string): boolean {
+    return IMAGE_EXTENSIONS.has(getFileExtension(filename));
+  }
+
+  function isMarkdownFile(filename: string): boolean {
+    return MARKDOWN_EXTENSIONS.has(getFileExtension(filename));
+  }
+
+  async function fetchFileList() {
+    try {
+      const response = await fetch("/api/files");
+      const body = (await response.json()) as { files?: FileEntry[] };
+      setFileEntries(Array.isArray(body.files) ? body.files : []);
+    } catch { /* silently ignore */ }
+  }
+
+  async function previewFile(file: FileEntry) {
+    if (file.isDirectory) return;
+    setSelectedFile(file);
+    setPreviewLoading(true);
+    setPreviewContent("");
+
+    // For images, no need to fetch text content
+    if (isImageFile(file.name)) {
+      setPreviewLoading(false);
+      return;
+    }
+
+    try {
+      const encodedPath = encodeURIComponent(file.path);
+      const response = await fetch(`/api/file-content?path=${encodedPath}`);
+      const body = (await response.json()) as { content?: string; error?: string };
+      if (body.error) {
+        setPreviewContent(`Error: ${body.error}`);
+      } else {
+        setPreviewContent(body.content || "");
+      }
+    } catch (error) {
+      setPreviewContent(error instanceof Error ? `Error: ${error.message}` : "Failed to load file content");
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  // --- File tree helpers ---
+  function getParentPath(filePath: string): string {
+    const lastSep = filePath.lastIndexOf('/');
+    if (lastSep <= 0) return '';
+    return filePath.substring(0, lastSep);
+  }
+
+  function buildFileTree(entries: FileEntry[]): FileTreeNode[] {
+    const nodeMap = new Map<string, FileTreeNode>();
+    const roots: FileTreeNode[] = [];
+
+    // Sort: directories first, then alphabetical
+    const sorted = [...entries].sort((a, b) => {
+      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    for (const entry of sorted) {
+      nodeMap.set(entry.path, { ...entry, children: [] });
+    }
+
+    for (const entry of sorted) {
+      const node = nodeMap.get(entry.path)!;
+      const parentPath = getParentPath(entry.path);
+      if (!parentPath) {
+        roots.push(node);
+      } else {
+        const parent = nodeMap.get(parentPath);
+        if (parent) {
+          parent.children.push(node);
+        } else {
+          roots.push(node);
+        }
+      }
+    }
+
+    return roots;
+  }
+
+  function toggleFolder(folderPath: string) {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(folderPath)) {
+        next.delete(folderPath);
+      } else {
+        next.add(folderPath);
+      }
+      return next;
+    });
+  }
+
+  // Handle sidebar resize
+  const handleSidebarResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+    
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      // Calculate delta and apply directly for linear response
+      const deltaX = moveEvent.clientX - startX;
+      // Since sidebar is on the right, moving left (negative delta) should increase width
+      // and moving right (positive delta) should decrease width
+      const newWidth = Math.max(200, Math.min(800, startWidth - deltaX));
+      setSidebarWidth(newWidth);
+    };
+    
+    const handleMouseUp = () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+    
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
 
   async function toggleModelMenu() {
     setModelMenuOpen((open) => !open);
@@ -1229,31 +1373,127 @@ function App() {
         />
       )}
 
-      <section ref={listRef} className="message-list session-path" aria-live="polite" onScroll={handleMessageListScroll}>
-        {timeline.items.length === 0 && !streamingMessage ? (
-          <div className="empty-state">Start a Pi RPC chat in {state.cwd || "this workspace"}.</div>
-        ) : (
-          <>
-            {timeline.truncated && (
-              <div className="truncation-notice">
-                Showing last {MAX_VISIBLE_MESSAGES} of {messages.length} messages.
-                Older messages are hidden for performance.
+      {/* Main content area with file sidebar */}
+      <div className="main-content-wrapper">
+        {/* Left side: Chat interface */}
+        <section ref={listRef} className="message-list session-path" aria-live="polite" onScroll={handleMessageListScroll} style={{ flex: 1 }}>
+          {timeline.items.length === 0 && !streamingMessage ? (
+            <div className="empty-state">Start a Pi RPC chat in {state.cwd || "this workspace"}.</div>
+          ) : (
+            <>
+              {timeline.truncated && (
+                <div className="truncation-notice">
+                  Showing last {MAX_VISIBLE_MESSAGES} of {messages.length} messages.
+                  Older messages are hidden for performance.
+                </div>
+              )}
+              {timeline.items.map((item, i) => renderTimelineItem(item, i))}
+
+              {streamingMessage && (
+                <StreamingAssistantCard
+                  trace={buildStreamingTrace(streamingMessage, toolEvents)}
+                  message={deferredStreamingMessage || streamingMessage}
+                />
+              )}
+
+              {timeline.liveItems
+                .map((item, i) => renderTimelineItem(item, i, "live"))}
+            </>
+          )}
+        </section>
+
+        {/* Resizable divider */}
+        <div 
+          className="sidebar-divider"
+          onMouseDown={handleSidebarResizeStart}
+        />
+
+        {/* Right side: File sidebar */}
+        <aside className="file-sidebar" style={{ width: `${sidebarWidth}px` }}>
+          <div className="file-sidebar-header">
+            <button 
+              className="toggle-sidebar-btn"
+              onClick={() => setSidebarVisible(!sidebarVisible)}
+              title={sidebarVisible ? "Hide files" : "Show files"}
+            >
+              {sidebarVisible ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+            </button>
+            <h3>Files</h3>
+            <button 
+              className="refresh-files-btn"
+              onClick={() => fetchFileList()}
+              title="Refresh file list"
+            >
+              <RefreshCcw size={14} />
+            </button>
+          </div>
+          
+          {sidebarVisible && (
+            <div className="file-list-container">
+              {fileEntries.length === 0 ? (
+                <div className="file-list-empty">No files found</div>
+              ) : (
+                <div className="file-tree">
+                  {buildFileTree(fileEntries).map((node) => (
+                    <FileTreeItem
+                      key={node.path}
+                      node={node}
+                      depth={0}
+                      selectedFile={selectedFile}
+                      expandedFolders={expandedFolders}
+                      onFileClick={previewFile}
+                      onFolderToggle={toggleFolder}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* Preview panel when file is selected */}
+          {sidebarVisible && selectedFile && (
+            <div className="file-preview-panel">
+              <div className="preview-header">
+                <h4>{selectedFile.name}</h4>
+                <button 
+                  className="close-preview-btn"
+                  onClick={() => setSelectedFile(null)}
+                  title="Close preview"
+                >
+                  ×
+                </button>
               </div>
-            )}
-            {timeline.items.map((item, i) => renderTimelineItem(item, i))}
-
-            {streamingMessage && (
-              <StreamingAssistantCard
-                trace={buildStreamingTrace(streamingMessage, toolEvents)}
-                message={deferredStreamingMessage || streamingMessage}
-              />
-            )}
-
-            {timeline.liveItems
-              .map((item, i) => renderTimelineItem(item, i, "live"))}
-          </>
-        )}
-      </section>
+              <div className="preview-content">
+                {previewLoading ? (
+                  <div className="preview-loading">
+                    <Loader2 size={20} className="spinner" />
+                    <span>Loading...</span>
+                  </div>
+                ) : isImageFile(selectedFile.name) ? (
+                  <div className="preview-image-container">
+                    <img
+                      className="preview-image"
+                      src={`/api/file-raw?path=${encodeURIComponent(selectedFile.path)}`}
+                      alt={selectedFile.name}
+                      onError={(e) => {
+                        console.error(`Failed to load image: ${selectedFile.path}`, e);
+                        const target = e.target as HTMLImageElement;
+                        target.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjZmZmIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtc2l6ZT0iMTQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGR5PSIuM2VtIiBmaWxsPSIjOTk5Ij5GYWlsZWQgdG8gbG9hZCBpbWFnZTwvdGV4dD48L3N2Zz4=';
+                      }}
+                    />
+                  </div>
+                ) : isMarkdownFile(selectedFile.name) ? (
+                  <div className="preview-markdown">
+                    <Markdown text={previewContent} />
+                  </div>
+                ) : (
+                  <pre className="preview-text">{previewContent}</pre>
+                )}
+              </div>
+            </div>
+          )}
+        </aside>
+      </div>
 
       <footer className="composer">
         {fileMenuOpen && filteredFiles.length > 0 && (
@@ -1735,6 +1975,75 @@ function ThinkingStatus({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// File tree item (recursive)
+// ============================================================================
+function FileTreeItem({
+  node,
+  depth,
+  selectedFile,
+  expandedFolders,
+  onFileClick,
+  onFolderToggle,
+}: {
+  node: FileTreeNode;
+  depth: number;
+  selectedFile: FileEntry | null;
+  expandedFolders: Set<string>;
+  onFileClick: (file: FileEntry) => void;
+  onFolderToggle: (path: string) => void;
+}) {
+  const isExpanded = expandedFolders.has(node.path);
+  const isSelected = selectedFile?.path === node.path;
+
+  if (node.isDirectory) {
+    return (
+      <div className="file-tree-folder" style={{ paddingLeft: `${depth * 12}px` }}>
+        <div
+          className={`file-tree-item-row folder-row${isExpanded ? ' expanded' : ''}`}
+          onClick={() => onFolderToggle(node.path)}
+          title={node.path}
+        >
+          <span className="file-tree-chevron">
+            {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </span>
+          <span className="file-tree-icon"><Folder size={14} /></span>
+          <span className="file-tree-name">{node.name}</span>
+        </div>
+        {isExpanded && (
+          <div className="file-tree-children">
+            {node.children.map((child) => (
+              <FileTreeItem
+                key={child.path}
+                node={child}
+                depth={depth + 1}
+                selectedFile={selectedFile}
+                expandedFolders={expandedFolders}
+                onFileClick={onFileClick}
+                onFolderToggle={onFolderToggle}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="file-tree-file" style={{ paddingLeft: `${depth * 12}px` }}>
+      <div
+        className={`file-tree-item-row file-row${isSelected ? ' selected' : ''}`}
+        onClick={() => onFileClick(node)}
+        title={node.path}
+      >
+        <span className="file-tree-chevron" />
+        <span className="file-tree-icon"><File size={14} /></span>
+        <span className="file-tree-name">{node.name}</span>
+      </div>
     </div>
   );
 }

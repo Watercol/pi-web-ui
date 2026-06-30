@@ -206,6 +206,81 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, rp
     return;
   }
 
+  if (req.method === "GET" && url.pathname.startsWith("/api/file-content")) {
+    const searchParams = new URLSearchParams(url.search);
+    const filePath = searchParams.get("path");
+    if (!filePath) {
+      sendJson(res, 400, { error: "Missing path parameter" });
+      return;
+    }
+    try {
+      // Security check: ensure path is within workspace
+      const cwd = rpc.getState().cwd;
+      if (!cwd) {
+        sendJson(res, 400, { error: "No workspace directory available" });
+        return;
+      }
+      const fullPath = path.resolve(cwd, filePath);
+      if (!fullPath.startsWith(cwd)) {
+        sendJson(res, 403, { error: "Access denied: path outside workspace" });
+        return;
+      }
+      const content = await fs.readFile(fullPath, "utf-8");
+      sendJson(res, 200, { content });
+    } catch (error) {
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  // Serve raw binary files (for images, etc.)
+  if (req.method === "GET" && url.pathname.startsWith("/api/file-raw")) {
+    const searchParams = new URLSearchParams(url.search);
+    const filePath = searchParams.get("path");
+    if (!filePath) {
+      sendJson(res, 400, { error: "Missing path parameter" });
+      return;
+    }
+    try {
+      const cwd = rpc.getState().cwd;
+      if (!cwd) {
+        sendJson(res, 400, { error: "No workspace directory available" });
+        return;
+      }
+      const fullPath = path.resolve(cwd, filePath);
+      if (!fullPath.startsWith(cwd)) {
+        sendJson(res, 403, { error: "Access denied: path outside workspace" });
+        return;
+      }
+      const stat = await fs.stat(fullPath);
+      if (!stat.isFile()) {
+        sendJson(res, 400, { error: "Not a file" });
+        return;
+      }
+      const ext = path.extname(fullPath).toLowerCase();
+      const mimeTypes: Record<string, string> = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".svg": "image/svg+xml",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+        ".ico": "image/x-icon",
+      };
+      const contentType = mimeTypes[ext] || "application/octet-stream";
+      const data = await fs.readFile(fullPath);
+      res.writeHead(200, {
+        "Content-Type": contentType,
+        "Content-Length": data.length,
+      });
+      res.end(data);
+    } catch (error) {
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/extension-response") {
     const body = (await readJson(req)) as ExtensionUiResponseRequest;
     const eventId = typeof body.eventId === "string" ? body.eventId.trim() : "";
