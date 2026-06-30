@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useDeferredValue } from "react";
 import { createRoot } from "react-dom/client";
-import { CircleStop, RefreshCcw, SendHorizontal, Terminal, Wrench, Monitor, FileCode, AlertTriangle, Loader2, ChevronDown, ChevronRight, Check, Plus, Folder, File } from "lucide-react";
+import { CircleStop, RefreshCcw, SendHorizontal, Terminal, Wrench, Monitor, FileCode, AlertTriangle, Loader2, ChevronDown, ChevronRight, ChevronLeft, Check, Plus, Folder, File } from "lucide-react";
 import type { ActivityEvent, AgentMessage, FileEntry, JsonValue, PiModel, PiSessionInfo, PiSlashCommand, PiState, ServerEvent, SessionStats, StreamingMessage, ToolExecutionEvent, ContentBlock, QueueState } from "../../shared/src/index.js";
 import { marked } from "marked";
 import "./styles.css";
@@ -152,6 +152,7 @@ function App() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(320);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [filesLoading, setFilesLoading] = useState(false);
 
   const { pushToast } = useToast();
   const { pushDialog } = useInteractiveDialog();
@@ -625,11 +626,17 @@ function App() {
   }
 
   async function fetchFileList() {
+    setFilesLoading(true);
     try {
-      const response = await fetch("/api/files");
+      const [response] = await Promise.all([
+        fetch("/api/files"),
+        // 最短加载时长，确保动画可见
+        new Promise((r) => setTimeout(r, 300)),
+      ]);
       const body = (await response.json()) as { files?: FileEntry[] };
       setFileEntries(Array.isArray(body.files) ? body.files : []);
     } catch { /* silently ignore */ }
+    setFilesLoading(false);
   }
 
   async function previewFile(file: FileEntry) {
@@ -1402,21 +1409,40 @@ function App() {
           )}
         </section>
 
-        {/* Resizable divider */}
-        <div 
-          className="sidebar-divider"
-          onMouseDown={handleSidebarResizeStart}
-        />
+        {/* Resizable divider — hidden when sidebar collapsed */}
+        {sidebarVisible && (
+          <div 
+            className="sidebar-divider"
+            onMouseDown={handleSidebarResizeStart}
+          />
+        )}
 
         {/* Right side: File sidebar */}
-        <aside className="file-sidebar" style={{ width: `${sidebarWidth}px` }}>
+        <aside
+          className={`file-sidebar${sidebarVisible ? "" : " collapsed"}`}
+          style={{ width: sidebarVisible ? `${sidebarWidth}px` : undefined }}
+        >
+          {/* Collapsed tab — only visible when sidebar is hidden */}
+          {!sidebarVisible && (
+            <button
+              className="sidebar-expand-tab"
+              onClick={() => setSidebarVisible(true)}
+              title="Show files"
+            >
+              <ChevronLeft size={14} />
+            </button>
+          )}
+
+          {/* Expanded sidebar content */}
+          {sidebarVisible && (
+            <>
           <div className="file-sidebar-header">
             <button 
               className="toggle-sidebar-btn"
-              onClick={() => setSidebarVisible(!sidebarVisible)}
-              title={sidebarVisible ? "Hide files" : "Show files"}
+              onClick={() => setSidebarVisible(false)}
+              title="Hide files"
             >
-              {sidebarVisible ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+              <ChevronRight size={16} />
             </button>
             <h3>Files</h3>
             <button 
@@ -1428,8 +1454,7 @@ function App() {
             </button>
           </div>
           
-          {sidebarVisible && (
-            <div className="file-list-container">
+          <div className={`file-list-container${filesLoading ? " is-loading" : ""}`}>
               {fileEntries.length === 0 ? (
                 <div className="file-list-empty">No files found</div>
               ) : (
@@ -1448,10 +1473,9 @@ function App() {
                 </div>
               )}
             </div>
-          )}
           
           {/* Preview panel when file is selected */}
-          {sidebarVisible && selectedFile && (
+          {selectedFile && (
             <div className="file-preview-panel">
               <div className="preview-header">
                 <h4>{selectedFile.name}</h4>
@@ -1491,6 +1515,8 @@ function App() {
                 )}
               </div>
             </div>
+          )}
+            </>
           )}
         </aside>
       </div>
@@ -1702,9 +1728,6 @@ function App() {
             Send
           </button>
         )}
-        <button type="button" className="icon-button" onClick={() => void Promise.all([fetchState(), fetchMessages()])} title="Refresh state">
-          <RefreshCcw size={18} />
-        </button>
       </footer>
     </main>
   );

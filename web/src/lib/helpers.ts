@@ -9,9 +9,11 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 type ThinkingLevel = typeof THINKING_LEVELS[number];
 
 export function resizeComposerTextarea(el: HTMLTextAreaElement) {
+  const MIN_HEIGHT = 46;
   el.style.height = "auto";
-  const maxHeight = Math.max(46, window.innerHeight * COMPOSER_MAX_VIEWPORT_RATIO);
-  const nextHeight = Math.min(el.scrollHeight, maxHeight);
+  const maxHeight = Math.max(MIN_HEIGHT, window.innerHeight * COMPOSER_MAX_VIEWPORT_RATIO);
+  // 空内容时直接使用最小高度，避免 scrollHeight 被 padding/line-height 撑大
+  const nextHeight = el.value.trim() === "" ? MIN_HEIGHT : Math.min(el.scrollHeight, maxHeight);
   el.style.height = `${nextHeight}px`;
   el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
 }

@@ -2143,6 +2143,35 @@ textarea {
   transition: width 200ms ease;
 }
 
+/* Collapsed sidebar — shrinks to just the expand tab */
+.file-sidebar.collapsed {
+  width: 36px !important;
+  min-width: 36px;
+  border-left: 1px solid var(--border-color);
+  align-items: center;
+  padding-top: 8px;
+}
+
+/* Vertical expand tab shown when sidebar is collapsed */
+.sidebar-expand-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 100ms ease, color 100ms ease;
+}
+
+.sidebar-expand-tab:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-primary);
+}
+
 .file-sidebar-header {
   display: flex;
   align-items: center;
@@ -2184,6 +2213,12 @@ textarea {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  transition: opacity 200ms ease;
+}
+
+.file-list-container.is-loading {
+  opacity: 0.35;
+  pointer-events: none;
 }
 
 .file-list-empty {
