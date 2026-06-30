@@ -6,11 +6,11 @@
   "author": "",
   "keywords": [
     "pi",
-    "coding-agent",
+    "pi-extension",
+    "pi-package",
     "web-ui",
-    "tui",
-    "ai",
-    "cli"
+    "pi-ui",
+    "ui"
   ],
   "engines": {
     "node": ">=20.0.0"
