@@ -157,6 +157,15 @@ function App() {
   const [filesLoading, setFilesLoading] = useState(false);
   const [previewHeight, setPreviewHeight] = useState(300);
 
+  // --- Cwd selector state ---
+  const [cwdMenuOpen, setCwdMenuOpen] = useState(false);
+  const [cwdPath, setCwdPath] = useState("");
+  const [cwdParent, setCwdParent] = useState("");
+  const [cwdEntries, setCwdEntries] = useState<{ name: string; path: string }[]>([]);
+  const [cwdLoading, setCwdLoading] = useState(false);
+  const [switchingCwd, setSwitchingCwd] = useState(false);
+  const cwdMenuRef = useRef<HTMLDivElement>(null);
+
   const { pushToast } = useToast();
   const { pushDialog } = useInteractiveDialog();
 
@@ -387,7 +396,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!modelMenuOpen && !sessionMenuOpen && !thinkingMenuOpen && !commandMenuOpen && !fileMenuOpen) return;
+    if (!modelMenuOpen && !sessionMenuOpen && !thinkingMenuOpen && !commandMenuOpen && !fileMenuOpen && !cwdMenuOpen) return;
 
     const handlePointerDown = (event: PointerEvent) => {
       if (!modelMenuRef.current?.contains(event.target as Node)) {
@@ -404,6 +413,9 @@ function App() {
       }
       if (!fileMenuRef.current?.contains(event.target as Node)) {
         setFileMenuOpen(false);
+      }
+      if (!cwdMenuRef.current?.contains(event.target as Node)) {
+        setCwdMenuOpen(false);
       }
     };
 
@@ -424,6 +436,7 @@ function App() {
         setModelMenuOpen(false);
         setSessionMenuOpen(false);
         setThinkingMenuOpen(false);
+        setCwdMenuOpen(false);
       }
     };
 
@@ -433,7 +446,7 @@ function App() {
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [modelMenuOpen, sessionMenuOpen, thinkingMenuOpen, commandMenuOpen, fileMenuOpen]);
+  }, [modelMenuOpen, sessionMenuOpen, thinkingMenuOpen, commandMenuOpen, fileMenuOpen, cwdMenuOpen]);
 
   useLayoutEffect(() => {
     const el = textareaRef.current;
@@ -609,6 +622,53 @@ function App() {
       }
       setSlashCommands([...merged.values()].sort((a, b) => a.name.localeCompare(b.name)));
     } catch { /* silently ignore — command bar works without server data */ }
+  }
+
+  // --- Cwd selector functions ---
+  async function fetchDirectories(dirPath?: string) {
+    setCwdLoading(true);
+    try {
+      const url = dirPath ? `/api/directories?path=${encodeURIComponent(dirPath)}` : "/api/directories";
+      const response = await fetch(url);
+      const body = (await response.json()) as { path?: string; parent?: string; entries?: { name: string; path: string }[] };
+      if (response.ok) {
+        setCwdPath(body.path || "");
+        setCwdParent(body.parent || "");
+        setCwdEntries(Array.isArray(body.entries) ? body.entries : []);
+      }
+    } catch { /* silently ignore */ }
+    setCwdLoading(false);
+  }
+
+  function toggleCwdMenu() {
+    const next = !cwdMenuOpen;
+    setCwdMenuOpen(next);
+    if (next) void fetchDirectories();
+  }
+
+  function navigateCwd(dirPath: string) {
+    void fetchDirectories(dirPath);
+  }
+
+  async function switchCwd(newCwd: string) {
+    setSwitchingCwd(true);
+    try {
+      const response = await fetch("/api/cwd", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: newCwd }),
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        setError(body.error || `Failed to switch directory: HTTP ${response.status}`);
+        return;
+      }
+      setCwdMenuOpen(false);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSwitchingCwd(false);
+    }
   }
 
   // --- File sidebar functions ---
@@ -1352,7 +1412,23 @@ function App() {
           <Terminal size={20} />
           <div>
             <h1>Pi Web UI</h1>
-            <p>{state.cwd || "Loading workspace"}{state.gitBranch ? ` (${state.gitBranch})` : ""}</p>
+            <div className="cwd-display" data-tooltip={state.cwd}>
+              <p>{state.cwd || "Loading workspace"}{state.gitBranch ? ` (${state.gitBranch})` : ""}</p>
+              <CwdSelector
+                currentCwd={state.cwd}
+                open={cwdMenuOpen}
+                loading={cwdLoading}
+                switching={switchingCwd}
+                cwdPath={cwdPath}
+                cwdParent={cwdParent}
+                entries={cwdEntries}
+                menuRef={cwdMenuRef}
+                onToggle={toggleCwdMenu}
+                onNavigate={navigateCwd}
+                onGoUp={() => navigateCwd(cwdParent)}
+                onSelect={(path) => void switchCwd(path)}
+              />
+            </div>
           </div>
         </div>
         <div className="status-grid">
@@ -2048,6 +2124,97 @@ function ThinkingStatus({
               })}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Cwd selector (directory browser)
+// ============================================================================
+function CwdSelector({
+  currentCwd,
+  open,
+  loading,
+  switching,
+  cwdPath,
+  cwdParent,
+  entries,
+  menuRef,
+  onToggle,
+  onNavigate,
+  onGoUp,
+  onSelect
+}: {
+  currentCwd: string;
+  open: boolean;
+  loading: boolean;
+  switching: boolean;
+  cwdPath: string;
+  cwdParent: string;
+  entries: { name: string; path: string }[];
+  menuRef: React.RefObject<HTMLDivElement | null>;
+  onToggle: () => void;
+  onNavigate: (path: string) => void;
+  onGoUp: () => void;
+  onSelect: (path: string) => void;
+}) {
+  return (
+    <div className="cwd-selector" ref={menuRef}>
+      <button
+        type="button"
+        className="cwd-switch-btn"
+        onClick={onToggle}
+        disabled={switching}
+        title="Switch working directory"
+      >
+        {switching ? <Loader2 size={12} className="spinner" /> : <Folder size={12} />}
+      </button>
+      {open && (
+        <div className="cwd-menu">
+          <div className="cwd-menu-header">
+            <button
+              type="button"
+              className="cwd-up-btn"
+              onClick={onGoUp}
+              disabled={loading || !cwdParent || cwdParent === cwdPath}
+              title="Go to parent directory"
+            >
+              <ChevronLeft size={14} />
+            </button>
+            <span className="cwd-path" title={cwdPath}>{cwdPath}</span>
+          </div>
+          {loading ? (
+            <div className="cwd-menu-empty"><Loader2 size={14} className="spinner" /> Loading...</div>
+          ) : entries.length === 0 ? (
+            <div className="cwd-menu-empty">No subdirectories</div>
+          ) : (
+            <div className="cwd-list">
+              {entries.map((entry) => (
+                <button
+                  type="button"
+                  key={entry.path}
+                  className="cwd-option"
+                  onClick={() => onNavigate(entry.path)}
+                >
+                  <Folder size={14} />
+                  <span>{entry.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="cwd-menu-footer">
+            <button
+              type="button"
+              className="cwd-select-btn"
+              onClick={() => onSelect(cwdPath)}
+              disabled={loading || switching || cwdPath === currentCwd}
+            >
+              {switching ? <Loader2 size={14} className="spinner" /> : <Check size={14} />}
+              {cwdPath === currentCwd ? "Current directory" : "Switch to this directory"}
+            </button>
+          </div>
         </div>
       )}
     </div>

@@ -116,6 +116,10 @@ textarea {
   min-width: 0;
 }
 
+.brand > div {
+  min-width: 0;
+}
+
 .brand h1 {
   margin: 0;
   font-size: var(--fs-xl);
@@ -2419,6 +2423,219 @@ textarea {
   padding: 16px;
   overflow: auto;
   height: 100%;
+}
+
+/* Cwd selector */
+.cwd-display {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 3px 0 0;
+}
+
+.cwd-display p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.cwd-display {
+  position: relative;
+}
+
+.cwd-display[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  max-width: 480px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #fff;
+  color: #17202a;
+  border: 1px solid var(--border-color);
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 200;
+  pointer-events: none;
+}
+
+.cwd-selector {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.cwd-switch-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--anim-fast) var(--ease-standard);
+}
+
+.cwd-switch-btn:hover:not(:disabled) {
+  background: var(--bg-subtle);
+  border-color: var(--border-hover);
+}
+
+.cwd-switch-btn:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.cwd-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: min(420px, 82vw);
+  max-height: min(480px, calc(100vh - 120px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  box-shadow: 0 16px 38px rgba(23, 32, 42, 0.18);
+  z-index: 100;
+}
+
+.cwd-menu-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-muted);
+}
+
+.cwd-up-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.cwd-up-btn:hover:not(:disabled) {
+  background: var(--bg-subtle);
+}
+
+.cwd-up-btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.cwd-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+  font-family: var(--font-mono);
+}
+
+.cwd-list {
+  flex: 1;
+  min-height: 0;
+  max-height: min(360px, calc(100vh - 240px));
+  overflow: auto;
+  padding: 8px;
+}
+
+.cwd-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.cwd-option:hover {
+  background: var(--bg-subtle);
+}
+
+.cwd-option svg {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.cwd-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cwd-menu-empty {
+  padding: 24px 14px;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.cwd-menu-footer {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-muted);
+}
+
+.cwd-select-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--anim-fast) var(--ease-standard);
+}
+
+.cwd-select-btn:hover:not(:disabled) {
+  background: var(--bg-subtle);
+  border-color: var(--border-hover);
+}
+
+.cwd-select-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 /* Accessibility: reduced motion */

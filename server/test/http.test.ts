@@ -124,6 +124,53 @@ describe("HTTP API", () => {
     const state = (await stateResponse.json()) as { sessionId?: string };
     expect(state.sessionId).toMatch(/^fake-session-/);
   });
+
+  it("lists directories", async () => {
+    const server = await startServer(config());
+    servers.push(server);
+
+    const response = await fetch(`${server.url}/api/directories?path=${encodeURIComponent(process.cwd())}`);
+    expect(response.ok).toBe(true);
+    const body = (await response.json()) as { path: string; parent: string; entries: Array<{ name: string; path: string }> };
+    expect(body.path).toBe(process.cwd());
+    expect(body.parent).toBe(path.dirname(process.cwd()));
+    expect(Array.isArray(body.entries)).toBe(true);
+    // Should contain known subdirectories
+    const names = body.entries.map((e) => e.name);
+    expect(names).toContain("server");
+    expect(names).toContain("web");
+    expect(names).toContain("shared");
+    // Should not include hidden dirs
+    expect(names).not.toContain(".git");
+  });
+
+  it("rejects invalid directory for cwd switch", async () => {
+    const server = await startServer(config());
+    servers.push(server);
+
+    const response = await fetch(`${server.url}/api/cwd`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/nonexistent/path/that/does/not/exist" })
+    });
+    expect(response.ok).toBe(false);
+    const body = (await response.json()) as { error?: string };
+    expect(body.error).toBeTruthy();
+  });
+
+  it("rejects empty cwd", async () => {
+    const server = await startServer(config());
+    servers.push(server);
+
+    const response = await fetch(`${server.url}/api/cwd`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "" })
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error?: string };
+    expect(body.error).toBe("cwd is required");
+  });
 });
 
 async function startServer(config: ServerConfig) {

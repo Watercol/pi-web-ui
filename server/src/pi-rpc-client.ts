@@ -101,6 +101,9 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
   private readonly streamingUsageMessages = new Map<string, AgentMessage>();
   private lastError: string | undefined;
 
+  // Suppress exit error when intentionally killing the process (e.g. cwd change).
+  private intentionalKill = false;
+
   // Coalesce rapid message_update events to reduce SSE traffic.
   // During LLM streaming, Pi may emit 60+ message_update per second;
   // buffering and flushing every 200ms cuts SSE events by ~92% (~5/s).
@@ -108,9 +111,9 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
   private messageUpdateTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly MESSAGE_UPDATE_COALESCE_MS = 200;
 
-  private readonly gitBranch: string | null;
+  private gitBranch: string | null;
 
-  constructor(private readonly config: ServerConfig) {
+  constructor(private config: ServerConfig) {
     super();
     this.gitBranch = resolveGitBranch(this.config.cwd);
   }
@@ -140,11 +143,17 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
       this.emitState();
     });
     child.on("exit", (code, signal) => {
-      const reason = `Pi RPC process exited${code === null ? "" : ` with code ${code}`}${signal ? ` (${signal})` : ""}`;
+      // Ignore if this child was already replaced (e.g. by changeCwd)
+      if (this.child !== child) return;
       this.clearMessageUpdateTimer();
       this.child = undefined;
-      this.setError(reason);
-      this.rejectAll(new Error(reason));
+      // Skip error reporting when intentionally killed (e.g. cwd change)
+      if (!this.intentionalKill) {
+        const reason = `Pi RPC process exited${code === null ? "" : ` with code ${code}`}${signal ? ` (${signal})` : ""}`;
+        this.setError(reason);
+        this.rejectAll(new Error(reason));
+      }
+      this.intentionalKill = false;
       this.emitState();
     });
 
@@ -306,6 +315,34 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEvents> {
   async switchSession(sessionPath: string): Promise<PiRpcResponse> {
     const response = await this.request("switch_session", { sessionPath });
     await this.refreshAfterSessionChange(response);
+    return response;
+  }
+
+  /** Kill the current Pi process, switch cwd, restart, and create a new session. */
+  async changeCwd(newCwd: string): Promise<PiRpcResponse> {
+    // Kill existing process and clear pending requests
+    if (this.child) {
+      this.intentionalKill = true;
+      this.clearMessageUpdateTimer();
+      this.child.kill();
+      this.child = undefined;
+    }
+    this.rejectAll(new Error("Cwd changed"));
+
+    // Update config and git branch
+    this.config.cwd = newCwd;
+    this.gitBranch = resolveGitBranch(newCwd);
+
+    // Reset state
+    this.lastStateData = {};
+    this.lastError = undefined;
+    this.messages = [];
+    this.streamingUsageMessages.clear();
+    this.lastStats = undefined;
+
+    // Start new process and create new session
+    this.start();
+    const response = await this.newSession();
     return response;
   }
 

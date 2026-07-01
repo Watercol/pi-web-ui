@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ModelSwitchRequest, PromptRequest, ServerEvent, SessionSwitchRequest, ThinkingLevelSwitchRequest } from "../../shared/src/index.js";
+import type { CwdSwitchRequest, ModelSwitchRequest, PromptRequest, ServerEvent, SessionSwitchRequest, ThinkingLevelSwitchRequest } from "../../shared/src/index.js";
 import type { ServerConfig } from "./config.js";
 import { PiRpcClient as PiRpcClientClass, type PiRpcClient } from "./pi-rpc-client.js";
 import { listSessions } from "./sessions.js";
@@ -150,6 +150,39 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, rp
       return;
     }
     sendJson(res, 200, await rpc.setThinkingLevel(level));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/directories") {
+    const requestedPath = url.searchParams.get("path");
+    const targetDir = requestedPath ? path.resolve(requestedPath) : path.dirname(rpc.getState().cwd);
+    try {
+      const entries = await listDirectories(targetDir);
+      sendJson(res, 200, { path: targetDir, parent: path.dirname(targetDir), entries });
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : "Failed to list directory" });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/cwd") {
+    const body = (await readJson(req)) as CwdSwitchRequest;
+    const newCwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
+    if (!newCwd) {
+      sendJson(res, 400, { error: "cwd is required" });
+      return;
+    }
+    try {
+      const resolved = path.resolve(newCwd);
+      const stat = await fs.stat(resolved);
+      if (!stat.isDirectory()) {
+        sendJson(res, 400, { error: "Path is not a directory" });
+        return;
+      }
+      sendJson(res, 200, await rpc.changeCwd(resolved));
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : "Failed to switch directory" });
+    }
     return;
   }
 
@@ -344,6 +377,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, rp
   }
 
   sendJson(res, 404, { error: "Not found" });
+}
+
+async function listDirectories(dir: string): Promise<{ name: string; path: string }[]> {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  return entries
+    .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+    .map((e) => ({ name: e.name, path: path.join(dir, e.name) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 async function walkDir(dir: string, baseDir: string, depth: number): Promise<{ name: string; path: string; isDirectory: boolean }[]> {

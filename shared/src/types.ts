@@ -186,6 +186,10 @@ export type ThinkingLevelSwitchRequest = {
   level: string;
 };
 
+export type CwdSwitchRequest = {
+  cwd: string;
+};
+
 /** Slash command returned by Pi RPC get_commands */
 export type PiSlashCommand = {
   name: string;
