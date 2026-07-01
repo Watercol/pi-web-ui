@@ -721,41 +721,21 @@ function App() {
     });
   }
 
-  // Handle sidebar resize
+  // Handle sidebar resize — direct DOM manipulation during drag avoids React
+  // re-renders; CSS flex naturally reflows the message list which is fast.
   const handleSidebarResizeStart = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
     const startWidth = sidebarWidth;
-    
+    const sidebarEl = document.querySelector<HTMLElement>('.file-sidebar');
+    let lastWidth = startWidth;
+
     const handleMouseMove = (moveEvent: MouseEvent) => {
-      // Calculate delta and apply directly for linear response
       const deltaX = moveEvent.clientX - startX;
-      // Since sidebar is on the right, moving left (negative delta) should increase width
-      // and moving right (positive delta) should decrease width
-      const newWidth = Math.max(200, Math.min(800, startWidth - deltaX));
-      setSidebarWidth(newWidth);
-    };
-    
-    const handleMouseUp = () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-    
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-  };
-
-  // Handle preview panel resize (vertical drag)
-  const handlePreviewResizeStart = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startHeight = previewHeight;
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      // Dragging up increases preview height, dragging down decreases it
-      const deltaY = startY - moveEvent.clientY;
-      const newHeight = Math.max(100, Math.min(800, startHeight + deltaY));
-      setPreviewHeight(newHeight);
+      lastWidth = Math.max(200, Math.min(800, startWidth - deltaX));
+      if (sidebarEl) {
+        sidebarEl.style.width = `${lastWidth}px`;
+      }
     };
 
     const handleMouseUp = () => {
@@ -763,6 +743,37 @@ function App() {
       document.removeEventListener('mouseup', handleMouseUp);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+      setSidebarWidth(lastWidth);
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
+
+  // Handle preview panel resize — same direct-DOM strategy as sidebar resize.
+  const handlePreviewResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = previewHeight;
+    const previewEl = document.querySelector<HTMLElement>('.file-preview-panel');
+    let lastHeight = startHeight;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaY = startY - moveEvent.clientY;
+      lastHeight = Math.max(100, Math.min(800, startHeight + deltaY));
+      if (previewEl) {
+        previewEl.style.height = `${lastHeight}px`;
+      }
+    };
+
+    const handleMouseUp = () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      setPreviewHeight(lastHeight);
     };
 
     document.body.style.cursor = 'row-resize';
