@@ -155,6 +155,7 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(320);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [filesLoading, setFilesLoading] = useState(false);
+  const [previewHeight, setPreviewHeight] = useState(300);
 
   const { pushToast } = useToast();
   const { pushDialog } = useInteractiveDialog();
@@ -740,6 +741,32 @@ function App() {
       document.removeEventListener('mouseup', handleMouseUp);
     };
     
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
+
+  // Handle preview panel resize (vertical drag)
+  const handlePreviewResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = previewHeight;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      // Dragging up increases preview height, dragging down decreases it
+      const deltaY = startY - moveEvent.clientY;
+      const newHeight = Math.max(100, Math.min(800, startHeight + deltaY));
+      setPreviewHeight(newHeight);
+    };
+
+    const handleMouseUp = () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
   };
@@ -1478,7 +1505,12 @@ function App() {
           
           {/* Preview panel when file is selected */}
           {selectedFile && (
-            <div className="file-preview-panel">
+            <>
+              <div
+                className="preview-resize-divider"
+                onMouseDown={handlePreviewResizeStart}
+              />
+              <div className="file-preview-panel" style={{ height: previewHeight }}>
               <div className="preview-header">
                 <h4>{selectedFile.name}</h4>
                 <button 
@@ -1517,6 +1549,7 @@ function App() {
                 )}
               </div>
             </div>
+            </>
           )}
             </>
           )}

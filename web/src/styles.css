@@ -2298,13 +2298,27 @@ textarea {
   flex-direction: column;
 }
 
+/* Horizontal resize divider between file list and preview panel */
+.preview-resize-divider {
+  height: 4px;
+  background: var(--border-color);
+  cursor: row-resize;
+  flex-shrink: 0;
+  transition: background 150ms ease;
+}
+
+.preview-resize-divider:hover {
+  background: var(--color-accent);
+}
+
 /* Preview panel */
 .file-preview-panel {
   display: flex;
   flex-direction: column;
-  height: 50%;
+  flex-shrink: 0;
   border-top: 1px solid var(--border-color);
   background: var(--bg-page);
+  overflow: hidden;
 }
 
 .preview-header {
